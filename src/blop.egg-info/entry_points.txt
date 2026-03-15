@@ -1,0 +1,3 @@
+[console_scripts]
+blop = blop.server:run
+blop-mcp = blop.server:run
