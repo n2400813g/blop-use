@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**vibeqa-mcp** (formerly vibetest) is an AI-powered QA testing tool that uses Browser-Use agents (backed by Google Gemini) to autonomously test web applications. It exposes 7 MCP tools via a FastMCP server that integrates with Cursor and Claude Code.
+**blop** (formerly vibetest) is an AI-powered QA testing tool that uses Browser-Use agents (backed by Google Gemini) to autonomously test web applications. It exposes 7 MCP tools via a FastMCP server that integrates with Cursor and Claude Code.
 
 ## Setup & Installation
 
@@ -21,18 +21,18 @@ See `.env.example` for all optional env vars.
 ## Running the MCP Server
 
 ```bash
-vibeqa-mcp
+blop-mcp
 # or
-vibeqa
+blop
 # or
-python -m vibeqa_mcp.server
+python -m blop.server
 ```
 
 The MCP server config for Cursor is in `.cursor/mcp.json`.
 
 ## Architecture
 
-All new logic lives in `src/vibeqa_mcp/`. The `vibetest/` package is a backward-compat shim.
+All new logic lives in `src/blop/`. The `vibetest/` package is a backward-compat shim.
 
 The system follows a **discover → auth → record → run → results** pipeline:
 
@@ -78,7 +78,7 @@ The system follows a **discover → auth → record → run → results** pipeli
 
 ## Artifacts
 
-Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB at `.vibetest/runs.db`.
+Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB at `.blop/runs.db`.
 
 ## Key Implementation Notes
 
@@ -86,4 +86,4 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - `make_browser_profile()` always disables user data dir and browser security features.
 - Gemini `gemini-2.0-flash-exp` for agents; `gemini-1.5-flash` for planning/classification.
 - `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`.
-- `vibetest/` package re-exports `run` from `vibeqa_mcp.server` for backward compatibility.
+- `vibetest/` package re-exports `run` from `blop.server` for backward compatibility.

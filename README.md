@@ -1,4 +1,4 @@
-# vibeqa-mcp
+# blop
 
 AI-powered QA testing via MCP — discover, record, and run regression tests with Browser-Use agents backed by Google Gemini.
 
@@ -31,9 +31,9 @@ Edit `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "vibeqa": {
+    "blop": {
       "command": "uv",
-      "args": ["--directory", "/path/to/blop-use", "run", "python", "-m", "vibeqa_mcp.server"],
+      "args": ["--directory", "/path/to/blop-use", "run", "python", "-m", "blop.server"],
       "env": {
         "GOOGLE_API_KEY": "your_api_key",
         "APP_BASE_URL": "https://your-app.com"
@@ -48,18 +48,18 @@ Edit `~/.cursor/mcp.json`:
 ## Claude Code Setup
 
 ```bash
-claude mcp add vibeqa /path/to/blop-use/.venv/bin/vibeqa-mcp \
+claude mcp add blop /path/to/blop-use/.venv/bin/blop-mcp \
   -e GOOGLE_API_KEY="your_api_key"
 ```
 
-Verify with `/mcp` — you should see `vibeqa: connected`.
+Verify with `/mcp` — you should see `blop: connected`.
 
 ---
 
 ## Starter Prompt
 
 ```
-Use vibeqa to test https://myapp.com:
+Use blop to test https://myapp.com:
 
 1. discover_test_flows("https://myapp.com") — find candidate test flows
 2. save_auth_profile("main", "env_login", login_url="https://myapp.com/login") — save auth
@@ -152,9 +152,9 @@ Returns: `{case_id, run_id, status, screenshots, console_log, repro_steps}`
 | `TEST_PASSWORD` | No | — | Login password for `env_login` |
 | `STORAGE_STATE_PATH` | No | — | Default Playwright storage state path |
 | `COOKIE_JSON_PATH` | No | — | Default cookie JSON path |
-| `VIBEQA_DB_PATH` | No | `.vibetest/runs.db` | SQLite database path |
-| `VIBEQA_HEADLESS` | No | `true` | Default headless mode |
-| `VIBEQA_MAX_STEPS` | No | `50` | Max agent steps per flow |
+| `BLOP_DB_PATH` | No | `.blop/runs.db` | SQLite database path |
+| `BLOP_HEADLESS` | No | `true` | Default headless mode |
+| `BLOP_MAX_STEPS` | No | `50` | Max agent steps per flow |
 
 ---
 
@@ -170,7 +170,7 @@ runs/
     <case_id>.zip
   console/<run_id>/
     <case_id>.log
-.vibetest/
+.blop/
   runs.db          # SQLite (auth_profiles, recorded_flows, runs, run_cases, artifacts)
   auth_state_*.json
 ```
@@ -195,7 +195,7 @@ pytest tests/ -v
 
 ## Backward Compatibility
 
-The `vibetest` package entry points (`vibetest`, `vibetest-mcp`) still work and point to the new server.
+The `vibetest/` package shim re-exports from the new `blop` package.
 
 ---
 

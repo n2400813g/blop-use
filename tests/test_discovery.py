@@ -11,7 +11,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_discover_flows_returns_fallback_without_api_key():
     """Returns fallback flows when GOOGLE_API_KEY is not set."""
-    from vibeqa_mcp.engine.discovery import discover_flows
+    from blop.engine.discovery import discover_flows
 
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock()
@@ -39,7 +39,7 @@ async def test_discover_flows_returns_fallback_without_api_key():
 @pytest.mark.asyncio
 async def test_discover_flows_with_gemini_response():
     """Parses Gemini response into flow dicts."""
-    from vibeqa_mcp.engine.discovery import discover_flows
+    from blop.engine.discovery import discover_flows
 
     gemini_response = json.dumps([
         {"flow_name": "login_flow", "goal": "Log in with valid credentials", "likely_assertions": ["redirect to dashboard"]},
@@ -80,7 +80,7 @@ async def test_discover_flows_with_gemini_response():
 @pytest.mark.asyncio
 async def test_discover_flows_count_clamped():
     """Result is always 3-8 flows."""
-    from vibeqa_mcp.engine.discovery import discover_flows
+    from blop.engine.discovery import discover_flows
 
     # Return more than 8
     many_flows = [
@@ -119,7 +119,7 @@ async def test_discover_flows_count_clamped():
 @pytest.mark.asyncio
 async def test_discover_flows_with_repo_path(tmp_path):
     """Uses repo path when provided."""
-    from vibeqa_mcp.engine.discovery import discover_flows
+    from blop.engine.discovery import discover_flows
 
     # Create a dummy tsx file
     page_dir = tmp_path / "pages"

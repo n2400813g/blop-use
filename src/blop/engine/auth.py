@@ -6,7 +6,7 @@ import os
 import time
 from typing import Optional
 
-from vibeqa_mcp.schemas import AuthProfile
+from blop.schemas import AuthProfile
 
 _auth_cache: dict[str, dict] = {}
 
@@ -39,8 +39,8 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
     from playwright.async_api import async_playwright
 
-    os.makedirs(".vibetest", exist_ok=True)
-    state_path = os.path.join(".vibetest", f"auth_state_{cache_key}.json")
+    os.makedirs(".blop", exist_ok=True)
+    state_path = os.path.join(".blop", f"auth_state_{cache_key}.json")
     username_selector = os.getenv("TEST_USERNAME_SELECTOR", "#email")
     password_selector = os.getenv("TEST_PASSWORD_SELECTOR", "#password")
 
@@ -77,8 +77,8 @@ async def _cookie_json(profile: AuthProfile) -> Optional[str]:
     with open(cookie_path) as f:
         cookies = json.load(f)
 
-    os.makedirs(".vibetest", exist_ok=True)
-    state_path = os.path.join(".vibetest", f"auth_state_{profile.profile_name}.json")
+    os.makedirs(".blop", exist_ok=True)
+    state_path = os.path.join(".blop", f"auth_state_{profile.profile_name}.json")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)

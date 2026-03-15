@@ -5,8 +5,8 @@ import asyncio
 import os
 from typing import Optional
 
-from vibeqa_mcp.schemas import FailureCase, RecordedFlow
-from vibeqa_mcp.storage import files as file_store
+from blop.schemas import FailureCase, RecordedFlow
+from blop.storage import files as file_store
 
 
 async def execute_flow(
@@ -22,7 +22,7 @@ async def execute_flow(
     """Replay a RecordedFlow, capturing screenshots/console/network evidence."""
     from browser_use import Agent, BrowserSession
     from browser_use.llm import ChatGoogle
-    from vibeqa_mcp.engine.browser import make_browser_profile
+    from blop.engine.browser import make_browser_profile
 
     google_api_key = os.getenv("GOOGLE_API_KEY", "dummy_key")
     run_headless = False if verbose else headless

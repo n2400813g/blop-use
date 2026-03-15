@@ -1,7 +1,7 @@
 """Aggregate run data into structured RunResult report."""
 from __future__ import annotations
 
-from vibeqa_mcp.schemas import FailureCase
+from blop.schemas import FailureCase
 
 
 async def build_report(run: dict, cases: list[FailureCase]) -> dict:

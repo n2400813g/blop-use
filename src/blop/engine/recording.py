@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from vibeqa_mcp.schemas import FlowStep
+from blop.schemas import FlowStep
 
 
 async def record_flow(
@@ -17,7 +17,7 @@ async def record_flow(
     """Run a Browser-Use agent for `goal` and capture each action as a FlowStep."""
     from browser_use import Agent, BrowserSession
     from browser_use.llm import ChatGoogle
-    from vibeqa_mcp.engine.browser import make_browser_profile
+    from blop.engine.browser import make_browser_profile
 
     google_api_key = os.getenv("GOOGLE_API_KEY", "")
     llm = ChatGoogle(model="gemini-2.0-flash-exp", temperature=0.7, api_key=google_api_key)

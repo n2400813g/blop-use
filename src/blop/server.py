@@ -10,10 +10,10 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vibeqa_mcp.storage.sqlite import init_db
-from vibeqa_mcp.tools import discover, auth, record, regression, results, debug
+from blop.storage.sqlite import init_db
+from blop.tools import discover, auth, record, regression, results, debug
 
-mcp = FastMCP("vibeqa")
+mcp = FastMCP("blop")
 
 
 @mcp.tool()
@@ -153,8 +153,8 @@ async def list_recorded_tests() -> dict:
         dict with flows (list of {flow_id, flow_name, app_url, goal, created_at}), total
     """
     try:
-        from vibeqa_mcp.storage.sqlite import list_flows
-        from vibeqa_mcp.schemas import RecordedTestsResult
+        from blop.storage.sqlite import list_flows
+        from blop.schemas import RecordedTestsResult
         flows = await list_flows()
         return RecordedTestsResult(flows=flows, total=len(flows)).model_dump()
     except Exception as e:

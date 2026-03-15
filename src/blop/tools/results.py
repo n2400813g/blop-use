@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from vibeqa_mcp.reporting import results as reporting
-from vibeqa_mcp.schemas import FailureCase
-from vibeqa_mcp.storage import sqlite
+from blop.reporting import results as reporting
+from blop.schemas import FailureCase
+from blop.storage import sqlite
 
 
 async def get_test_results(run_id: str) -> dict:

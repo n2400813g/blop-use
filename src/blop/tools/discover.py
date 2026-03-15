@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from vibeqa_mcp.engine import discovery
-from vibeqa_mcp.schemas import DiscoverResult
+from blop.engine import discovery
+from blop.schemas import DiscoverResult
 
 
 async def discover_test_flows(app_url: str, repo_path: Optional[str] = None) -> dict:

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vibeqa_mcp.schemas import FlowStep, RecordedFlow
+from blop.schemas import FlowStep, RecordedFlow
 
 
 def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFlow:
@@ -28,7 +28,7 @@ def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFl
 @pytest.mark.asyncio
 async def test_execute_flow_pass():
     """Flow returns pass status when result has no error keywords."""
-    from vibeqa_mcp.engine.regression import execute_flow
+    from blop.engine.regression import execute_flow
 
     mock_history = MagicMock()
     mock_history.final_result.return_value = "All steps completed successfully"
@@ -43,8 +43,8 @@ async def test_execute_flow_pass():
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("browser_use.Agent", return_value=mock_agent):
             with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("vibeqa_mcp.engine.browser.make_browser_profile"):
-                    with patch("vibeqa_mcp.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                with patch("blop.engine.browser.make_browser_profile"):
+                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                         flow = make_flow()
                         case = await execute_flow(
                             flow=flow,
@@ -62,7 +62,7 @@ async def test_execute_flow_pass():
 @pytest.mark.asyncio
 async def test_execute_flow_fail_on_error_keyword():
     """Flow returns fail status when result contains error keywords."""
-    from vibeqa_mcp.engine.regression import execute_flow
+    from blop.engine.regression import execute_flow
 
     mock_history = MagicMock()
     mock_history.final_result.return_value = "Page returned 404 error"
@@ -77,8 +77,8 @@ async def test_execute_flow_fail_on_error_keyword():
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("browser_use.Agent", return_value=mock_agent):
             with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("vibeqa_mcp.engine.browser.make_browser_profile"):
-                    with patch("vibeqa_mcp.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                with patch("blop.engine.browser.make_browser_profile"):
+                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                         flow = make_flow()
                         case = await execute_flow(
                             flow=flow,
@@ -95,7 +95,7 @@ async def test_execute_flow_fail_on_error_keyword():
 @pytest.mark.asyncio
 async def test_run_flows_parallel():
     """run_flows executes multiple flows and returns one case per flow."""
-    from vibeqa_mcp.engine.regression import run_flows
+    from blop.engine.regression import run_flows
 
     mock_history = MagicMock()
     mock_history.final_result.return_value = "Success"
@@ -112,8 +112,8 @@ async def test_run_flows_parallel():
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("browser_use.Agent", return_value=mock_agent):
             with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("vibeqa_mcp.engine.browser.make_browser_profile"):
-                    with patch("vibeqa_mcp.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                with patch("blop.engine.browser.make_browser_profile"):
+                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                         cases = await run_flows(
                             flows=flows,
                             app_url="https://example.com",
@@ -129,7 +129,7 @@ async def test_run_flows_parallel():
 @pytest.mark.asyncio
 async def test_run_flows_semaphore():
     """run_flows respects semaphore and does not exceed 5 concurrent flows."""
-    from vibeqa_mcp.engine.regression import run_flows
+    from blop.engine.regression import run_flows
 
     concurrent_count = 0
     max_concurrent = 0
@@ -141,7 +141,7 @@ async def test_run_flows_semaphore():
         await asyncio.sleep(0.05)
         concurrent_count -= 1
 
-        from vibeqa_mcp.schemas import FailureCase
+        from blop.schemas import FailureCase
         return FailureCase(
             run_id=kwargs.get("run_id", "run1"),
             flow_id=kwargs.get("flow", make_flow()).flow_id,
@@ -151,7 +151,7 @@ async def test_run_flows_semaphore():
 
     flows = [make_flow(f"flow{i}") for i in range(10)]
 
-    with patch("vibeqa_mcp.engine.regression.execute_flow", side_effect=slow_execute):
+    with patch("blop.engine.regression.execute_flow", side_effect=slow_execute):
         cases = await run_flows(
             flows=flows,
             app_url="https://example.com",

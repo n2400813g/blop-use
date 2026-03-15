@@ -50,7 +50,7 @@ async def safe_click(
         pass
 
     if fallback_vision:
-        from vibeqa_mcp.engine.vision import click_by_vision
+        from blop.engine.vision import click_by_vision
         try:
             await click_by_vision(page, selector)
             return True
@@ -75,7 +75,7 @@ async def safe_fill(
         pass
 
     if fallback_vision:
-        from vibeqa_mcp.engine.vision import find_element_coords
+        from blop.engine.vision import find_element_coords
         try:
             coords = await find_element_coords(page, selector)
             if coords:

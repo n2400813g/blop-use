@@ -4,10 +4,10 @@ import asyncio
 import uuid
 from typing import Optional
 
-from vibeqa_mcp.engine import auth as auth_engine
-from vibeqa_mcp.engine import classifier, regression as regression_engine
-from vibeqa_mcp.schemas import RunStartedResult
-from vibeqa_mcp.storage import sqlite, files as file_store
+from blop.engine import auth as auth_engine
+from blop.engine import classifier, regression as regression_engine
+from blop.schemas import RunStartedResult
+from blop.storage import sqlite, files as file_store
 
 
 async def run_regression_test(

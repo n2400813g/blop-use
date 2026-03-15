@@ -15,6 +15,6 @@ TEST_PASSWORD: str = os.getenv("TEST_PASSWORD", "")
 STORAGE_STATE_PATH: str = os.getenv("STORAGE_STATE_PATH", "")
 COOKIE_JSON_PATH: str = os.getenv("COOKIE_JSON_PATH", "")
 
-VIBEQA_DB_PATH: str = os.getenv("VIBEQA_DB_PATH", ".vibetest/runs.db")
-VIBEQA_HEADLESS: bool = os.getenv("VIBEQA_HEADLESS", "true").lower() == "true"
-VIBEQA_MAX_STEPS: int = int(os.getenv("VIBEQA_MAX_STEPS", "50"))
+BLOP_DB_PATH: str = os.getenv("BLOP_DB_PATH", ".blop/runs.db")
+BLOP_HEADLESS: bool = os.getenv("BLOP_HEADLESS", "true").lower() == "true"
+BLOP_MAX_STEPS: int = int(os.getenv("BLOP_MAX_STEPS", "50"))

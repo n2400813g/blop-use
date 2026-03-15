@@ -1,7 +1,7 @@
 [project]
-name = "vibeqa-mcp"
+name = "blop"
 version = "0.2.0"
-description = "AI-powered QA testing via MCP — discover, record, and run regression tests with Browser-Use agents"
+description = "AI-powered QA testing via MCP"
 requires-python = ">=3.11"
 dependencies = [
   "mcp[cli]>=1.0.0",
@@ -22,7 +22,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["vibeqa_mcp*"]
+include = ["blop*"]
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -31,7 +31,5 @@ include = ["vibeqa_mcp*"]
 asyncio_mode = "auto"
 
 [project.scripts]
-vibeqa = "vibeqa_mcp.server:run"
-vibeqa-mcp = "vibeqa_mcp.server:run"
-vibetest = "vibeqa_mcp.server:run"
-vibetest-mcp = "vibeqa_mcp.server:run"
+blop = "blop.server:run"
+blop-mcp = "blop.server:run"

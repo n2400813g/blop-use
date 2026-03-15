@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from vibeqa_mcp.engine import auth as auth_engine
-from vibeqa_mcp.engine import recording
-from vibeqa_mcp.schemas import RecordedFlow, RecordedFlowResult
-from vibeqa_mcp.storage import sqlite, files as file_store
+from blop.engine import auth as auth_engine
+from blop.engine import recording
+from blop.schemas import RecordedFlow, RecordedFlowResult
+from blop.storage import sqlite, files as file_store
 
 
 async def record_test_flow(

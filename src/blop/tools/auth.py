@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from vibeqa_mcp.engine import auth as auth_engine
-from vibeqa_mcp.schemas import AuthProfile, AuthProfileResult
-from vibeqa_mcp.storage import sqlite
+from blop.engine import auth as auth_engine
+from blop.schemas import AuthProfile, AuthProfileResult
+from blop.storage import sqlite
 
 
 async def save_auth_profile(

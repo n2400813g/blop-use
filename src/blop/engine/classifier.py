@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from vibeqa_mcp.schemas import FailureCase
+from blop.schemas import FailureCase
 
 
 async def classify_case(case: FailureCase, url: str) -> FailureCase:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vibeqa_mcp.schemas import AuthProfile
+from blop.schemas import AuthProfile
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def cookie_json_profile(tmp_path):
 @pytest.mark.asyncio
 async def test_env_login_missing_credentials(env_login_profile):
     """Returns None when env vars are not set."""
-    from vibeqa_mcp.engine.auth import resolve_storage_state
+    from blop.engine.auth import resolve_storage_state
 
     with patch.dict(os.environ, {}, clear=True):
         result = await resolve_storage_state(env_login_profile)
@@ -56,7 +56,7 @@ async def test_env_login_missing_credentials(env_login_profile):
 @pytest.mark.asyncio
 async def test_storage_state_returns_path(storage_state_profile):
     """Returns path when file exists."""
-    from vibeqa_mcp.engine.auth import resolve_storage_state
+    from blop.engine.auth import resolve_storage_state
 
     result = await resolve_storage_state(storage_state_profile)
     assert result == storage_state_profile.storage_state_path
@@ -65,7 +65,7 @@ async def test_storage_state_returns_path(storage_state_profile):
 @pytest.mark.asyncio
 async def test_storage_state_missing_file():
     """Returns None when file does not exist."""
-    from vibeqa_mcp.engine.auth import resolve_storage_state
+    from blop.engine.auth import resolve_storage_state
 
     profile = AuthProfile(
         profile_name="missing",
@@ -79,7 +79,7 @@ async def test_storage_state_missing_file():
 @pytest.mark.asyncio
 async def test_env_login_uses_cache(tmp_path):
     """Second call within 1 hour returns cached path without re-login."""
-    from vibeqa_mcp.engine import auth as auth_engine
+    from blop.engine import auth as auth_engine
 
     state_file = tmp_path / "cached.json"
     state_file.write_text("{}")
@@ -104,7 +104,7 @@ async def test_env_login_uses_cache(tmp_path):
 @pytest.mark.asyncio
 async def test_cookie_json_path(cookie_json_profile, tmp_path):
     """cookie_json path calls playwright and saves state."""
-    from vibeqa_mcp.engine.auth import resolve_storage_state
+    from blop.engine.auth import resolve_storage_state
 
     mock_context = AsyncMock()
     mock_browser = AsyncMock()
@@ -114,7 +114,7 @@ async def test_cookie_json_path(cookie_json_profile, tmp_path):
     mock_playwright.__aexit__ = AsyncMock(return_value=False)
     mock_playwright.chromium.launch.return_value = mock_browser
 
-    expected_path = os.path.join(".vibetest", f"auth_state_{cookie_json_profile.profile_name}.json")
+    expected_path = os.path.join(".blop", f"auth_state_{cookie_json_profile.profile_name}.json")
 
     with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
         with patch("os.makedirs"):

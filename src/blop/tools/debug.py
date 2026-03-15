@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from vibeqa_mcp.engine import auth as auth_engine
-from vibeqa_mcp.engine import classifier, regression as regression_engine
-from vibeqa_mcp.schemas import DebugResult, FailureCase
-from vibeqa_mcp.storage import sqlite
+from blop.engine import auth as auth_engine
+from blop.engine import classifier, regression as regression_engine
+from blop.schemas import DebugResult, FailureCase
+from blop.storage import sqlite
 
 
 async def debug_test_case(run_id: str, case_id: str) -> dict:
@@ -42,7 +42,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     )
     new_case = await classifier.classify_case(new_case, run["app_url"])
 
-    from vibeqa_mcp.storage.files import console_log_path
+    from blop.storage.files import console_log_path
     import os
     log_path = console_log_path(run_id, case_id)
     console_log = ""

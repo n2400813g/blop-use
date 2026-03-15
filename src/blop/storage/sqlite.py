@@ -6,12 +6,12 @@ import uuid
 
 import aiosqlite
 
-from vibeqa_mcp.config import VIBEQA_DB_PATH
-from vibeqa_mcp.schemas import AuthProfile, RecordedFlow, FailureCase
+from blop.config import BLOP_DB_PATH
+from blop.schemas import AuthProfile, RecordedFlow, FailureCase
 
 
 def _db_path() -> str:
-    return os.environ.get("VIBEQA_DB_PATH", VIBEQA_DB_PATH)
+    return os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
 
 
 async def init_db() -> None:
@@ -127,7 +127,7 @@ async def save_flow(flow: RecordedFlow) -> None:
 
 
 async def get_flow(flow_id: str) -> RecordedFlow | None:
-    from vibeqa_mcp.schemas import FlowStep
+    from blop.schemas import FlowStep
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
             "SELECT flow_id, flow_name, app_url, goal, steps_json, created_at FROM recorded_flows WHERE flow_id = ?",
