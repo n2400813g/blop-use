@@ -1,0 +1,96 @@
+{
+    "cookies": [
+        {
+            "name": "sessionId",
+            "value": "s%3AosRSJlLqnWEX8V7LJ5N-kD-5kjkb7gND.cpXkUBvJsL%2BDRFVCiVBzSxRyG7hwGXcby50aptpOCkU",
+            "domain": "www.sens-ai.dk",
+            "path": "/",
+            "expires": 1774212347.601994,
+            "size": 91,
+            "httpOnly": true,
+            "secure": true,
+            "session": false,
+            "sameSite": "Lax",
+            "priority": "Medium",
+            "sourceScheme": "Secure",
+            "sourcePort": 443
+        },
+        {
+            "name": "m",
+            "value": "2729731f-9bc9-4355-95c3-fc5b71e7060d0b177f",
+            "domain": "m.stripe.com",
+            "path": "/",
+            "expires": 1808167643.074993,
+            "size": 43,
+            "httpOnly": true,
+            "secure": true,
+            "session": false,
+            "sameSite": "None",
+            "priority": "Medium",
+            "sourceScheme": "Secure",
+            "sourcePort": 443
+        },
+        {
+            "name": "__stripe_mid",
+            "value": "e6c72429-0ecb-48f4-9456-879d4f7a6c95fef685",
+            "domain": ".www.sens-ai.dk",
+            "path": "/",
+            "expires": 1805143643,
+            "size": 54,
+            "httpOnly": false,
+            "secure": true,
+            "session": false,
+            "sameSite": "Strict",
+            "priority": "Medium",
+            "sourceScheme": "Secure",
+            "sourcePort": 443
+        },
+        {
+            "name": "__stripe_sid",
+            "value": "60ff28a6-9808-46d0-89cf-7844e5c5fa73d5ebcc",
+            "domain": ".www.sens-ai.dk",
+            "path": "/",
+            "expires": 1773609443,
+            "size": 54,
+            "httpOnly": false,
+            "secure": true,
+            "session": false,
+            "sameSite": "Strict",
+            "priority": "Medium",
+            "sourceScheme": "Secure",
+            "sourcePort": 443
+        }
+    ],
+    "origins": [
+        {
+            "origin": "https://www.sens-ai.dk",
+            "sessionStorage": [
+                {
+                    "name": "sentryReplaySession",
+                    "value": "{\"id\":\"711c1e1b44134c028e6072c37fb6d0f5\",\"started\":1773607547495,\"lastActivity\":1773607638260,\"segmentId\":0,\"sampled\":\"buffer\",\"dirty\":true}"
+                }
+            ]
+        },
+        {
+            "origin": "https://m.stripe.network",
+            "sessionStorage": [
+                {
+                    "name": "_ab",
+                    "value": "false"
+                },
+                {
+                    "name": "_mf",
+                    "value": "1100111100000000100110111100000000000011001000010111111"
+                },
+                {
+                    "name": "1",
+                    "value": "1"
+                },
+                {
+                    "name": "id",
+                    "value": "11d4a03421b3ef4c846d76ee7597c8d5"
+                }
+            ]
+        }
+    ]
+}

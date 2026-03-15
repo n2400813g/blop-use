@@ -15,7 +15,18 @@ async def run_regression_test(
     flow_ids: list[str],
     profile_name: Optional[str] = None,
     headless: bool = True,
+    run_mode: str = "hybrid",
+    command: Optional[str] = None,
 ) -> dict:
+    # If command provided, parse for additional intent
+    if command:
+        from blop.engine.planner import parse_command
+        intent = await parse_command(command, app_url, profile_name=profile_name)
+        if intent.run_mode != "hybrid":
+            run_mode = intent.run_mode
+        if intent.profile_name and not profile_name:
+            profile_name = intent.profile_name
+
     run_id = uuid.uuid4().hex
 
     profile = None
@@ -27,10 +38,12 @@ async def run_regression_test(
         storage_state = await auth_engine.resolve_storage_state(profile)
 
     artifacts_dir = file_store.artifacts_dir(run_id)
-    await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir)
+    await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
 
     # Fire-and-forget; caller polls get_test_results
-    asyncio.create_task(_run_and_persist(run_id, flow_ids, app_url, storage_state, headless))
+    asyncio.create_task(
+        _run_and_persist(run_id, flow_ids, app_url, storage_state, headless, run_mode)
+    )
 
     return RunStartedResult(
         run_id=run_id,
@@ -46,6 +59,7 @@ async def _run_and_persist(
     app_url: str,
     storage_state: Optional[str],
     headless: bool,
+    run_mode: str = "hybrid",
 ) -> None:
     from datetime import datetime, timezone
 
@@ -62,9 +76,9 @@ async def _run_and_persist(
             run_id=run_id,
             storage_state=storage_state,
             headless=headless,
+            run_mode=run_mode,
         )
 
-        # Classify each case
         classified = []
         for case in cases:
             classified.append(await classifier.classify_case(case, app_url))

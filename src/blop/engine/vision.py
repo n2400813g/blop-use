@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 def _llm():
     from browser_use.llm import ChatGoogle
     return ChatGoogle(
-        model="gemini-2.0-flash-exp",
+        model="gemini-2.5-flash",
         temperature=0.1,
         api_key=os.getenv("GOOGLE_API_KEY", ""),
     )
@@ -63,6 +63,14 @@ async def click_by_vision(page: "Page", description: str) -> None:
     coords = await find_element_coords(page, description)
     if coords:
         await page.mouse.click(coords[0], coords[1])
+
+
+async def locate_visual_target(page: "Page", description: str, nearby_text: str | None = None) -> tuple[int, int] | None:
+    """Find an element using description plus optional nearby_text hint for disambiguation."""
+    full_desc = description
+    if nearby_text:
+        full_desc = f"{description} (near text: {nearby_text})"
+    return await find_element_coords(page, full_desc)
 
 
 async def assert_by_vision(page: "Page", assertion: str) -> bool:

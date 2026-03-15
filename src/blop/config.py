@@ -1,10 +1,20 @@
 import logging
 import os
+from pathlib import Path
 
 # Suppress all logging before any imports
 logging.disable(logging.CRITICAL)
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "CRITICAL")
+
+# Load .env from the repo root (two levels up from this file: src/blop/config.py → repo root)
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)  # override=False: explicit env vars take precedence
+except Exception:
+    pass
 
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 APP_BASE_URL: str = os.getenv("APP_BASE_URL", "")

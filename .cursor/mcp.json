@@ -4,11 +4,14 @@
       "command": "uv",
       "args": ["--directory", "/Users/alejandrolaurlund/Development/blop-use", "run", "python", "-m", "blop.server"],
       "env": {
-        "GOOGLE_API_KEY": "${GOOGLE_API_KEY}",
-        "APP_BASE_URL": "https://your-app.com",
-        "LOGIN_URL": "https://your-app.com/login",
-        "TEST_USERNAME": "demo@example.com",
-        "TEST_PASSWORD": "secret"
+        "GOOGLE_API_KEY": "AIzaSyB1GfIvtbUwNq9_CyDHQEzSlF3Spj-Kigg",
+        "APP_BASE_URL": "https://www.sens-ai.dk/",
+        "LOGIN_URL": "https://www.sens-ai.dk/auth",
+        "TEST_USERNAME": "alejandro@laurlund.com",
+        "TEST_PASSWORD": "TestPassword123",
+        "BLOP_DB_PATH": ".blop/runs.db",
+        "BLOP_HEADLESS": "true",
+        "BLOP_MAX_STEPS": "50"
       }
     }
   }

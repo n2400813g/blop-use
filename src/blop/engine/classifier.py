@@ -1,17 +1,88 @@
-"""Severity labelling and next-actions — ported from vibetest/classifier.py."""
+"""Severity labelling: deterministic rules first, Gemini LLM fallback."""
 from __future__ import annotations
 
 import json
 import os
 import re
+from typing import Optional
 
 from blop.schemas import FailureCase
 
 
-async def classify_case(case: FailureCase, url: str) -> FailureCase:
-    """Assign severity and repro_steps via Gemini. Returns updated case."""
+# ---------------------------------------------------------------------------
+# Deterministic severity scoring
+# ---------------------------------------------------------------------------
+
+def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
+    """Return severity string without calling LLM, or None to fall through to Gemini."""
     if case.status == "pass":
-        case.severity = "none"
+        return "none"
+
+    # Blocker: HTTP 5xx, auth failure, uncaught JS crash
+    network_5xx = any(
+        err.startswith(("5", "500", "502", "503", "504"))
+        for err in case.network_errors
+    )
+    if network_5xx:
+        return "blocker"
+
+    # Auth failure (401/403 in network errors or console)
+    auth_failure = any(
+        any(kw in err for kw in ("401", "403", "unauthorized", "forbidden"))
+        for err in case.network_errors + case.console_errors
+    )
+    if auth_failure:
+        return "blocker"
+
+    # Uncaught JS crash
+    js_crash = any(
+        any(kw in err.lower() for kw in ("uncaught", "typeerror", "referenceerror", "syntaxerror", "crash"))
+        for err in case.console_errors
+    )
+    if js_crash:
+        return "blocker"
+
+    if case.status == "blocked":
+        return "blocker"
+
+    # High: core CTA assertion failed, form submit broken, pricing/contact URL 404
+    assertion_failures = case.assertion_failures or []
+    high_keywords = ("login", "sign in", "checkout", "payment", "submit", "register", "subscribe")
+    for af in assertion_failures:
+        if any(kw in af.lower() for kw in high_keywords):
+            return "high"
+
+    network_404 = any(
+        err.startswith("404") and any(kw in err for kw in ("/pricing", "/contact", "/checkout", "/payment"))
+        for err in case.network_errors
+    )
+    if network_404:
+        return "high"
+
+    if assertion_failures:
+        return "medium"
+
+    # Low: console warnings only, no assertion failures
+    has_console_warnings = bool(case.console_errors)
+    if has_console_warnings and case.status == "fail":
+        return "medium"
+
+    if case.status in ("fail", "error"):
+        return "medium"
+
+    return None  # Let Gemini decide
+
+
+# ---------------------------------------------------------------------------
+# LLM-assisted classification
+# ---------------------------------------------------------------------------
+
+async def classify_case(case: FailureCase, url: str) -> FailureCase:
+    """Assign severity and repro_steps. Uses deterministic rules first; Gemini fallback."""
+    # Deterministic pass
+    det_severity = classify_failure_deterministic(case)
+    if det_severity is not None:
+        case.severity = det_severity
         return case
 
     google_api_key = os.getenv("GOOGLE_API_KEY")
@@ -22,18 +93,20 @@ async def classify_case(case: FailureCase, url: str) -> FailureCase:
     from browser_use.llm import ChatGoogle
     from browser_use.llm.messages import UserMessage
 
-    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.1)
+    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.1)
     console_text = "\n".join(case.console_errors[:10]) or "none"
     network_text = "\n".join(case.network_errors[:10]) or "none"
+    assertion_text = "\n".join(case.assertion_failures[:5]) or "none"
 
     prompt = f"""You are a QA analyst reviewing a browser test result for {url}.
 
 Test flow: "{case.flow_name}"
-Goal: {case.flow_name}
 Status: {case.status}
+Replay mode: {case.replay_mode}
 Result: {case.raw_result[:2000]}
 Console errors: {console_text}
 Network errors: {network_text}
+Assertion failures: {assertion_text}
 
 Severity levels:
 - blocker: Complete feature failure, prevents core user workflow
@@ -45,7 +118,7 @@ Severity levels:
 Return JSON only:
 {{
   "severity": "blocker|high|medium|low|none",
-  "repro_steps": ["step 1", "step 2", ...],
+  "repro_steps": ["step 1", "step 2"],
   "summary": "one-line description"
 }}"""
 
@@ -65,17 +138,19 @@ Return JSON only:
 
 async def classify_run(cases: list[FailureCase], url: str) -> dict:
     """Aggregate classified cases and generate next_actions."""
-    failed = [c for c in cases if c.status in ("fail", "error")]
+    failed = [c for c in cases if c.status in ("fail", "error", "blocked")]
     next_actions: list[str] = []
 
     if failed and os.getenv("GOOGLE_API_KEY"):
         next_actions = await _generate_next_actions(failed, url)
 
-    severity_counts: dict[str, int] = {"blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0}
+    severity_counts: dict[str, int] = {
+        "blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0
+    }
     for c in cases:
         if c.status == "pass":
             severity_counts["pass"] = severity_counts.get("pass", 0) + 1
-        elif c.status == "error":
+        elif c.status in ("error", "blocked"):
             severity_counts["error"] = severity_counts.get("error", 0) + 1
         else:
             severity_counts[c.severity] = severity_counts.get(c.severity, 0) + 1
@@ -88,16 +163,20 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
 
 
 async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> list[str]:
-    from browser_use.llm import ChatGoogle
-    from browser_use.llm.messages import UserMessage
+    from blop.prompts import NEXT_ACTIONS_PROMPT
 
     google_api_key = os.getenv("GOOGLE_API_KEY")
     if not google_api_key:
         return []
 
-    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.3)
+    from browser_use.llm import ChatGoogle
+    from browser_use.llm.messages import UserMessage
+
+    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.3)
+
+    # Build a summary of failed cases
     failures_text = "\n".join(
-        f"- Flow: {c.flow_name}\n  Severity: {c.severity}\n  Result: {c.raw_result[:300]}"
+        f"- Flow: {c.flow_name}\n  Severity: {c.severity}\n  Replay: {c.replay_mode}\n  Result: {c.raw_result[:300]}"
         for c in failed_cases[:5]
     )
 

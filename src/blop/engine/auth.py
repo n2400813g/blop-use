@@ -41,17 +41,39 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
     os.makedirs(".blop", exist_ok=True)
     state_path = os.path.join(".blop", f"auth_state_{cache_key}.json")
-    username_selector = os.getenv("TEST_USERNAME_SELECTOR", "#email")
-    password_selector = os.getenv("TEST_PASSWORD_SELECTOR", "#password")
+    username_selector = os.getenv("TEST_USERNAME_SELECTOR", "")
+    password_selector = os.getenv("TEST_PASSWORD_SELECTOR", "")
+
+    # Fallback selector chains — ordered by specificity
+    _user_selectors = [s for s in [username_selector] if s] + [
+        "input[name='username']", "input[name='email']",
+        "input[type='email']", "#email", "input[placeholder*='email' i]",
+        "input[placeholder*='username' i]",
+    ]
+    _pass_selectors = [s for s in [password_selector] if s] + [
+        "input[name='password']", "input[type='password']", "#password",
+    ]
+
+    async def _try_fill(page, selectors: list[str], value: str) -> str:
+        """Try each selector in order; return the one that worked."""
+        for sel in selectors:
+            try:
+                el = await page.wait_for_selector(sel, timeout=5000)
+                if el:
+                    await el.fill(value)
+                    return sel
+            except Exception:
+                continue
+        raise RuntimeError(f"Could not find input with any of: {selectors}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
         await page.goto(login_url)
-        await page.fill(username_selector, username)
-        await page.fill(password_selector, password)
-        await page.press(password_selector, "Enter")
+        await _try_fill(page, _user_selectors, username)
+        working_pass_sel = await _try_fill(page, _pass_selectors, password)
+        await page.press(working_pass_sel, "Enter")
         await page.wait_for_load_state("networkidle")
         await context.storage_state(path=state_path)
         await browser.close()

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import re
+
 from blop.engine import auth as auth_engine
 from blop.engine import classifier, regression as regression_engine
 from blop.schemas import DebugResult, FailureCase
@@ -11,7 +15,6 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     if not run:
         return {"error": f"Run {run_id} not found"}
 
-    # Find case
     cases = await sqlite.list_cases_for_run(run_id)
     if not cases and run.get("cases"):
         cases = [FailureCase(**c) for c in run["cases"]]
@@ -31,6 +34,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
         if profile:
             storage_state = await auth_engine.resolve_storage_state(profile)
 
+    # Re-run in headed + verbose mode, using hybrid replay
     new_case = await regression_engine.execute_flow(
         flow=flow,
         app_url=run["app_url"],
@@ -39,16 +43,19 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
         storage_state=storage_state,
         headless=False,
         verbose=True,
+        run_mode=run.get("run_mode", "hybrid"),
     )
     new_case = await classifier.classify_case(new_case, run["app_url"])
 
     from blop.storage.files import console_log_path
-    import os
     log_path = console_log_path(run_id, case_id)
     console_log = ""
     if os.path.exists(log_path):
         with open(log_path) as f:
             console_log = f.read()
+
+    # Generate plain-English "why this failed" explanation
+    why_failed = await _explain_failure(new_case, flow, run["app_url"])
 
     return DebugResult(
         case_id=new_case.case_id,
@@ -57,4 +64,49 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
         screenshots=new_case.screenshots,
         console_log=console_log or "\n".join(new_case.console_errors),
         repro_steps=new_case.repro_steps,
+        step_failure_index=new_case.step_failure_index,
+        replay_mode=new_case.replay_mode,
+        assertion_failures=new_case.assertion_failures,
+        why_failed=why_failed,
     ).model_dump()
+
+
+async def _explain_failure(case: FailureCase, flow, url: str) -> str:
+    """Generate a plain-English explanation of why the test failed."""
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    if not google_api_key or case.status == "pass":
+        return ""
+
+    from blop.prompts import NEXT_ACTIONS_PROMPT
+
+    # Find the failed step description
+    step_desc = "unknown"
+    step_index = case.step_failure_index or 0
+    if flow and flow.steps and step_index < len(flow.steps):
+        step_desc = flow.steps[step_index].description
+
+    try:
+        from browser_use.llm import ChatGoogle
+        from browser_use.llm.messages import UserMessage
+
+        llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.2)
+        prompt = NEXT_ACTIONS_PROMPT.format(
+            flow_name=case.flow_name,
+            goal=flow.goal if flow else case.flow_name,
+            step_index=step_index,
+            step_description=step_desc,
+            replay_mode=case.replay_mode,
+            assertion_failures=", ".join(case.assertion_failures[:3]) or "none",
+            console_errors=", ".join(case.console_errors[:3]) or "none",
+        )
+
+        response = await llm.ainvoke([UserMessage(content=prompt)])
+        text = str(response.content) if hasattr(response, "content") else str(response)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            return result.get("why_failed", "")
+    except Exception:
+        pass
+
+    return ""
