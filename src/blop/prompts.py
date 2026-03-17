@@ -26,9 +26,15 @@ For each flow return:
 - likely_assertions: list of 1-3 specific, verifiable assertions
 - severity_if_broken: "blocker" | "high" | "medium" | "low"
 - confidence: float 0.0-1.0 representing how confident you are this flow exists
+- business_criticality: "revenue" | "activation" | "retention" | "support" | "other"
+  - revenue: flows involving checkout, billing, payments, upgrades, subscriptions
+  - activation: flows involving signup, onboarding, first-time setup, first value moment
+  - retention: flows involving dashboard usage, core product features, settings
+  - support: flows involving help, docs, contact
+  - other: anything else
 
 Return ONLY a JSON array, no other text:
-[{{"flow_name": "...", "goal": "...", "starting_url": "...", "preconditions": [], "likely_assertions": ["..."], "severity_if_broken": "high", "confidence": 0.85}}]"""
+[{{"flow_name": "...", "goal": "...", "starting_url": "...", "preconditions": [], "likely_assertions": ["..."], "severity_if_broken": "high", "confidence": 0.85, "business_criticality": "revenue"}}]"""
 
 
 REPAIR_STEP_PROMPT = """You are a browser automation expert repairing a broken test step.
@@ -39,22 +45,26 @@ The following test step failed to execute:
 - Target text: {target_text}
 - Step description: {description}
 - Current URL: {current_url}
+{aria_section}
+The current page screenshot is also attached.
 
-The current page screenshot is attached.
+Provide a repaired action that will accomplish the same goal.
 
-Please provide:
-1. A repaired action that will accomplish the same goal using what you can see on the page
-2. A verification assertion to confirm the step succeeded
+If an ARIA tree is provided above, prefer selecting an element by role+name from it.
+Otherwise use the screenshot to find the element.
 
 Return ONLY a JSON object:
 {{
+  "repaired_locator_type": "css|role|text|label",
   "repaired_selector": "...",
+  "repaired_role": "...",
+  "repaired_name": "...",
   "repaired_action": "click|fill|navigate",
   "repaired_value": "...",
   "verification_assertion": "..."
 }}
 
-If the element is not visible on screen, set repaired_selector to null."""
+If the element is not visible, set repaired_selector to null and repaired_role to null."""
 
 
 NEXT_ACTIONS_PROMPT = """You are a QA engineer explaining a test failure in plain English.

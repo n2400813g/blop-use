@@ -105,10 +105,12 @@ async def _migrate(db) -> None:
     migrations = [
         ("recorded_flows", "assertions_json", "TEXT"),
         ("recorded_flows", "entry_url", "TEXT"),
+        ("recorded_flows", "business_criticality", "TEXT DEFAULT 'other'"),
         ("runs", "run_mode", "TEXT DEFAULT 'hybrid'"),
         ("run_cases", "replay_mode", "TEXT"),
         ("run_cases", "step_failure_index", "INTEGER"),
         ("run_cases", "assertion_failures_json", "TEXT"),
+        ("run_cases", "business_criticality", "TEXT DEFAULT 'other'"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -153,8 +155,8 @@ async def save_flow(flow: RecordedFlow) -> None:
         await db.execute(
             """
             INSERT OR REPLACE INTO recorded_flows
-            (flow_id, flow_name, app_url, goal, steps_json, created_at, assertions_json, entry_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (flow_id, flow_name, app_url, goal, steps_json, created_at, assertions_json, entry_url, business_criticality)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow.flow_id,
@@ -165,6 +167,7 @@ async def save_flow(flow: RecordedFlow) -> None:
                 flow.created_at,
                 json.dumps(flow.assertions_json),
                 flow.entry_url,
+                flow.business_criticality,
             ),
         )
         await db.commit()
@@ -175,7 +178,7 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
             """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
-                      assertions_json, entry_url
+                      assertions_json, entry_url, business_criticality
                FROM recorded_flows WHERE flow_id = ?""",
             (flow_id,),
         ) as cursor:
@@ -190,6 +193,13 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     s.setdefault("url_before", None)
                     s.setdefault("url_after", None)
                     s.setdefault("screenshot_path", None)
+                    # Semantic locator fields (added in v2)
+                    s.setdefault("aria_role", None)
+                    s.setdefault("aria_name", None)
+                    s.setdefault("aria_snapshot", None)
+                    s.setdefault("testid_selector", None)
+                    s.setdefault("label_text", None)
+                    s.setdefault("structured_assertion", None)
                     steps.append(FlowStep(**s))
 
                 assertions_json: list[str] = []
@@ -208,6 +218,7 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     created_at=row[5],
                     assertions_json=assertions_json,
                     entry_url=row[7],
+                    business_criticality=row[8] or "other",
                 )
     return None
 
@@ -237,7 +248,7 @@ async def create_run(
         await db.execute(
             """
             INSERT INTO runs (run_id, app_url, profile_name, flow_ids_json, status, started_at, headless, artifacts_dir, run_mode)
-            VALUES (?, ?, ?, ?, 'running', datetime('now'), ?, ?, ?)
+            VALUES (?, ?, ?, ?, 'queued', datetime('now'), ?, ?, ?)
             """,
             (
                 run_id,
@@ -248,6 +259,16 @@ async def create_run(
                 artifacts_dir,
                 run_mode,
             ),
+        )
+        await db.commit()
+
+
+async def update_run_status(run_id: str, status: str) -> None:
+    """Update only the status of a run (lightweight state-machine transition)."""
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            "UPDATE runs SET status = ? WHERE run_id = ?",
+            (status, run_id),
         )
         await db.commit()
 

@@ -17,11 +17,13 @@ def _llm():
         model="gemini-2.5-flash",
         temperature=0.1,
         api_key=os.getenv("GOOGLE_API_KEY", ""),
+        max_output_tokens=256,
     )
 
 
 async def _screenshot_b64(page: "Page") -> str:
-    img_bytes = await page.screenshot()
+    """Capture JPEG screenshot at 70% quality — ~5x smaller than PNG."""
+    img_bytes = await page.screenshot(type="jpeg", quality=70)
     return base64.b64encode(img_bytes).decode()
 
 
@@ -47,7 +49,7 @@ If not found, return {{"x": null, "y": null}}"""
         llm = _llm()
         response = await llm.ainvoke([UserMessage(content=[
             {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ])])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r'\{"x":\s*(\d+|null),\s*"y":\s*(\d+|null)\}', text)
@@ -75,27 +77,46 @@ async def locate_visual_target(page: "Page", description: str, nearby_text: str 
 
 async def assert_by_vision(page: "Page", assertion: str) -> bool:
     """Take a screenshot and ask Gemini whether the assertion is true."""
-    if not os.getenv("GOOGLE_API_KEY"):
-        return False
+    results = await assert_all_by_vision(page, [assertion])
+    return results[0] if results else False
+
+
+async def assert_all_by_vision(page: "Page", assertions: list[str]) -> list[bool]:
+    """Evaluate multiple assertions in a single Gemini call (one screenshot, one LLM call)."""
+    if not os.getenv("GOOGLE_API_KEY") or not assertions:
+        return [False] * len(assertions)
 
     try:
+        from browser_use.llm import ChatGoogle
         from browser_use.llm.messages import UserMessage
 
         b64 = await _screenshot_b64(page)
-        prompt = f"""Look at this screenshot.
-Is the following assertion true? "{assertion}"
-Return ONLY: {{"passed": true}} or {{"passed": false}}"""
+        numbered = "\n".join(f'{i + 1}. "{a}"' for i, a in enumerate(assertions))
+        prompt = f"""Look at this screenshot. For each assertion, return true or false.
 
-        llm = _llm()
+Assertions:
+{numbered}
+
+Return ONLY a JSON array of booleans in the same order (e.g. [true, false, true]):"""
+
+        llm = ChatGoogle(
+            model="gemini-2.5-flash",
+            temperature=0.1,
+            api_key=os.getenv("GOOGLE_API_KEY", ""),
+            max_output_tokens=64,
+        )
         response = await llm.ainvoke([UserMessage(content=[
             {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ])])
         text = str(response.content) if hasattr(response, "content") else str(response)
-        m = re.search(r'"passed":\s*(true|false)', text)
+        m = re.search(r"\[.*?\]", text, re.DOTALL)
         if m:
-            return m.group(1) == "true"
+            result = json.loads(m.group())
+            if isinstance(result, list):
+                padded = list(result) + [False] * (len(assertions) - len(result))
+                return [bool(v) for v in padded[:len(assertions)]]
     except Exception:
         pass
 
-    return False
+    return [False] * len(assertions)

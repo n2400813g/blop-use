@@ -178,8 +178,8 @@ async def plan_flows_from_inventory(
     from browser_use.llm import ChatGoogle
     from browser_use.llm.messages import UserMessage
 
-    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.7)
-    inventory_text = json.dumps(inventory.to_dict(), indent=2)
+    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.7, max_output_tokens=2000)
+    inventory_text = json.dumps(inventory.to_dict(), separators=(",", ":"))
 
     extra_context = ""
     if business_goal:
@@ -208,6 +208,7 @@ async def plan_flows_from_inventory(
                     f.setdefault("likely_assertions", [])
                     f.setdefault("severity_if_broken", "medium")
                     f.setdefault("confidence", 0.7)
+                    f.setdefault("business_criticality", "other")
                     valid_flows.append(f)
             if valid_flows:
                 return valid_flows
@@ -316,7 +317,7 @@ async def _flows_from_repo(
     from browser_use.llm import ChatGoogle
     from browser_use.llm.messages import UserMessage
 
-    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.7)
+    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.7, max_output_tokens=2000)
     file_list = "\n".join(files[:50])
     extra = f"\nBusiness goal: {business_goal}" if business_goal else ""
 
@@ -324,10 +325,12 @@ async def _flows_from_repo(
 {file_list}
 
 Generate 5-8 browser test flows as JSON with keys:
-flow_name, goal, starting_url, preconditions, likely_assertions, severity_if_broken, confidence
+flow_name, goal, starting_url, preconditions, likely_assertions, severity_if_broken, confidence, business_criticality
+
+business_criticality must be one of: revenue, activation, retention, support, other
 
 Return only a JSON array:
-[{{"flow_name": "...", "goal": "...", "starting_url": "...", "preconditions": [], "likely_assertions": ["..."], "severity_if_broken": "high", "confidence": 0.8}}]"""
+[{{"flow_name": "...", "goal": "...", "starting_url": "...", "preconditions": [], "likely_assertions": ["..."], "severity_if_broken": "high", "confidence": 0.8, "business_criticality": "revenue"}}]"""
 
     try:
         response = await llm.ainvoke([UserMessage(content=prompt)])
@@ -343,6 +346,7 @@ Return only a JSON array:
                     f.setdefault("likely_assertions", [])
                     f.setdefault("severity_if_broken", "medium")
                     f.setdefault("confidence", 0.7)
+                    f.setdefault("business_criticality", "other")
                     valid.append(f)
             if valid:
                 return valid

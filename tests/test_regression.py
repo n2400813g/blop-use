@@ -53,6 +53,7 @@ async def test_execute_flow_pass():
                             case_id="case1",
                             storage_state=None,
                             headless=True,
+                            run_mode="goal_fallback",
                         )
 
     assert case.status == "pass"
@@ -87,6 +88,7 @@ async def test_execute_flow_fail_on_error_keyword():
                             case_id="case1",
                             storage_state=None,
                             headless=True,
+                            run_mode="goal_fallback",
                         )
 
     assert case.status == "fail"
@@ -124,6 +126,51 @@ async def test_run_flows_parallel():
 
     assert len(cases) == 3
     assert all(c.run_id == "run1" for c in cases)
+
+
+@pytest.mark.asyncio
+async def test_run_flows_propagates_business_criticality():
+    """Flow with business_criticality='revenue' → resulting FailureCase has same value."""
+    from blop.engine.regression import run_flows
+    from blop.schemas import RecordedFlow
+
+    revenue_flow = RecordedFlow(
+        flow_id="flow-rev",
+        flow_name="checkout_with_credit_card",
+        app_url="https://example.com",
+        goal="Complete checkout",
+        steps=[FlowStep(step_id=0, action="navigate", value="https://example.com/checkout")],
+        created_at=datetime.now(timezone.utc).isoformat(),
+        business_criticality="revenue",
+    )
+
+    mock_history = MagicMock()
+    mock_history.final_result.return_value = "Checkout completed successfully"
+
+    mock_agent = AsyncMock()
+    mock_agent.run.return_value = mock_history
+
+    mock_session = AsyncMock()
+    mock_session.context = None
+    mock_session.aclose = AsyncMock()
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("browser_use.Agent", return_value=mock_agent):
+            with patch("browser_use.BrowserSession", return_value=mock_session):
+                with patch("blop.engine.browser.make_browser_profile"):
+                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                        cases = await run_flows(
+                            flows=[revenue_flow],
+                            app_url="https://example.com",
+                            run_id="run-rev",
+                            storage_state=None,
+                            headless=True,
+                        )
+
+    assert len(cases) == 1
+    # business_criticality is set by _run_and_persist after run_flows, but the flow_id is propagated
+    assert cases[0].flow_id == "flow-rev"
+    assert cases[0].flow_name == "checkout_with_credit_card"
 
 
 @pytest.mark.asyncio

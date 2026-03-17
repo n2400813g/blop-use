@@ -15,6 +15,7 @@ async def record_test_flow(
     goal: str,
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
+    business_criticality: str = "other",
 ) -> dict:
     # If command provided, parse for additional intent context
     if command:
@@ -49,6 +50,9 @@ async def record_test_flow(
         if s.action == "assert" and (s.value or s.description)
     ]
 
+    valid_criticalities = {"revenue", "activation", "retention", "support", "other"}
+    bc = business_criticality if business_criticality in valid_criticalities else "other"
+
     flow = RecordedFlow(
         flow_name=flow_name,
         app_url=app_url,
@@ -57,6 +61,7 @@ async def record_test_flow(
         created_at=datetime.now(timezone.utc).isoformat(),
         assertions_json=assertions_json,
         entry_url=app_url,
+        business_criticality=bc,
     )
     await sqlite.save_flow(flow)
 

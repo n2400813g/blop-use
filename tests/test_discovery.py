@@ -30,8 +30,9 @@ async def test_discover_flows_returns_fallback_without_api_key():
 
     with patch.dict(os.environ, {}, clear=True):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
-            flows = await discover_flows("https://example.com")
+            result = await discover_flows("https://example.com")
 
+    flows = result["flows"]
     assert len(flows) >= 3
     assert all("flow_name" in f and "goal" in f for f in flows)
 
@@ -71,8 +72,9 @@ async def test_discover_flows_with_gemini_response():
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
-                flows = await discover_flows("https://example.com")
+                result = await discover_flows("https://example.com")
 
+    flows = result["flows"]
     assert len(flows) >= 3
     assert flows[0]["flow_name"] == "login_flow"
 
@@ -114,6 +116,65 @@ async def test_discover_flows_count_clamped():
                 flows = await discover_flows("https://example.com")
 
     assert 3 <= len(flows) <= 8
+
+
+@pytest.mark.asyncio
+async def test_discover_flows_includes_business_criticality():
+    """Gemini response includes business_criticality → flows in result have it; missing field falls back to 'other'."""
+    from blop.engine.discovery import discover_flows
+
+    gemini_response = json.dumps([
+        {
+            "flow_name": "checkout_with_credit_card",
+            "goal": "Complete checkout",
+            "likely_assertions": ["order confirmed"],
+            "business_criticality": "revenue",
+        },
+        {
+            "flow_name": "user_signup_onboarding",
+            "goal": "Sign up",
+            "likely_assertions": ["welcome screen"],
+            "business_criticality": "activation",
+        },
+        {
+            "flow_name": "help_center_search",
+            "goal": "Search help",
+            "likely_assertions": ["results appear"],
+            # no business_criticality — should default to 'other'
+        },
+    ])
+
+    mock_response = MagicMock()
+    mock_response.content = gemini_response
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke.return_value = mock_response
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock()
+    mock_page.evaluate = AsyncMock(return_value=[])
+
+    mock_context = AsyncMock()
+    mock_context.new_page.return_value = mock_page
+
+    mock_browser = AsyncMock()
+    mock_browser.new_context.return_value = mock_context
+
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
+                result = await discover_flows("https://example.com")
+
+    flows = result["flows"]
+    bc_values = {f.get("business_criticality") for f in flows}
+    assert "revenue" in bc_values
+    assert "activation" in bc_values
+    # The flow without business_criticality should default to 'other'
+    assert all(f.get("business_criticality") in {"revenue", "activation", "other"} for f in flows)
 
 
 @pytest.mark.asyncio

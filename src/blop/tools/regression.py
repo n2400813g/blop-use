@@ -35,7 +35,20 @@ async def run_regression_test(
 
     storage_state: Optional[str] = None
     if profile:
-        storage_state = await auth_engine.resolve_storage_state(profile)
+        try:
+            storage_state = await auth_engine.resolve_storage_state(profile)
+        except Exception:
+            # Auth resolution failure — transition to waiting_auth immediately
+            artifacts_dir = file_store.artifacts_dir(run_id)
+            await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
+            await sqlite.update_run_status(run_id, "waiting_auth")
+            return {
+                "run_id": run_id,
+                "status": "waiting_auth",
+                "flow_count": len(flow_ids),
+                "artifacts_dir": artifacts_dir,
+                "message": f"Auth profile '{profile_name}' could not be resolved. Check save_auth_profile and your credentials.",
+            }
 
     artifacts_dir = file_store.artifacts_dir(run_id)
     await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
@@ -47,7 +60,7 @@ async def run_regression_test(
 
     return RunStartedResult(
         run_id=run_id,
-        status="running",
+        status="queued",
         flow_count=len(flow_ids),
         artifacts_dir=artifacts_dir,
     ).model_dump()
@@ -62,6 +75,9 @@ async def _run_and_persist(
     run_mode: str = "hybrid",
 ) -> None:
     from datetime import datetime, timezone
+
+    # Transition: queued → running
+    await sqlite.update_run_status(run_id, "running")
 
     try:
         flows = []
@@ -79,12 +95,15 @@ async def _run_and_persist(
             run_mode=run_mode,
         )
 
+        # Attach business_criticality from source flow to each case, then classify
         classified = []
+        flow_criticality = {f.flow_id: f.business_criticality for f in flows}
         for case in cases:
+            case.business_criticality = flow_criticality.get(case.flow_id, "other")
             classified.append(await classifier.classify_case(case, app_url))
             await sqlite.save_case(case)
 
         completed_at = datetime.now(timezone.utc).isoformat()
         await sqlite.update_run(run_id, "completed", classified, completed_at)
-    except Exception as e:
+    except Exception:
         await sqlite.update_run(run_id, "failed", [], None)

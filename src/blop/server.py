@@ -11,7 +11,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from blop.storage.sqlite import init_db
-from blop.tools import discover, auth, record, regression, results, debug
+from blop.tools import discover, auth, record, regression, results, debug, validate
 
 mcp = FastMCP("blop")
 
@@ -99,6 +99,7 @@ async def record_test_flow(
     goal: str,
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
+    business_criticality: Optional[str] = "other",
 ) -> dict:
     """Record a test flow by running a Browser-Use agent to accomplish a goal.
 
@@ -111,6 +112,7 @@ async def record_test_flow(
         goal: Plain-English description of what to accomplish
         profile_name: Optional auth profile name (from save_auth_profile)
         command: Optional natural language command for additional context
+        business_criticality: "revenue" | "activation" | "retention" | "support" | "other"
 
     Returns:
         dict with flow_id, flow_name, step_count, status, artifacts_dir
@@ -122,6 +124,7 @@ async def record_test_flow(
             goal=goal,
             profile_name=profile_name,
             command=command,
+            business_criticality=business_criticality or "other",
         )
     except Exception as e:
         return {"error": str(e)}
@@ -217,6 +220,127 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
         return await debug.debug_test_case(run_id, case_id)
     except Exception as e:
         return {"error": str(e)}
+
+
+@mcp.tool()
+async def validate_setup(
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Check all preconditions before running tests.
+
+    Verifies: GOOGLE_API_KEY, Chromium installation, SQLite DB access,
+    optional app_url reachability, and optional auth profile validity.
+
+    Args:
+        app_url: Optional URL to check reachability
+        profile_name: Optional auth profile name to validate
+
+    Returns:
+        dict with status ("ready" | "warnings" | "blocked"), checks, blockers, warnings
+    """
+    try:
+        return await validate.validate_setup(
+            app_url=app_url,
+            profile_name=profile_name,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# MCP Prompts — surface workflow starting points in Claude Code / Cursor
+# ---------------------------------------------------------------------------
+
+@mcp.prompt()
+def discover_critical_flows() -> str:
+    return """First run validate_setup to confirm your environment is ready:
+  validate_setup(app_url="https://your-app.com")
+
+If status is "ready", discover the most important test flows:
+  discover_test_flows(
+    app_url="https://your-app.com",
+    business_goal="Find the 5 most revenue-critical flows including signup, onboarding, and billing."
+  )
+
+The response will include flows with a business_criticality field (revenue, activation, retention, support, other).
+Start by recording flows tagged "revenue" or "activation" — those are the ones that will hurt most if broken."""
+
+
+@mcp.prompt()
+def setup_auth() -> str:
+    return """To test authenticated flows, save an auth profile first.
+
+Choose the auth_type that matches your app:
+
+1. env_login — agent logs in with credentials from environment variables:
+   save_auth_profile(
+     profile_name="staging",
+     auth_type="env_login",
+     login_url="https://your-app.com/login",
+     username_env="TEST_USERNAME",
+     password_env="TEST_PASSWORD"
+   )
+   Then set: export TEST_USERNAME=user@example.com && export TEST_PASSWORD=secret
+
+2. storage_state — replay a Playwright session file:
+   save_auth_profile(
+     profile_name="staging",
+     auth_type="storage_state",
+     storage_state_path="/path/to/storage_state.json"
+   )
+
+3. cookie_json — inject raw cookies:
+   save_auth_profile(
+     profile_name="staging",
+     auth_type="cookie_json",
+     cookie_json_path="/path/to/cookies.json"
+   )
+
+After saving, pass profile_name to record_test_flow and run_regression_test."""
+
+
+@mcp.prompt()
+def run_smoke_regression() -> str:
+    return """To run a quick smoke regression against all recorded flows:
+
+1. List available flows:
+   list_recorded_tests()
+
+2. Run regression (returns immediately — poll for results):
+   run_regression_test(
+     app_url="https://your-app.com",
+     flow_ids=["<flow_id_1>", "<flow_id_2>"],
+     profile_name="staging"  # optional
+   )
+   The status will be "queued" → "running" → "completed"
+
+3. Poll for results (repeat until status is "completed" or "failed"):
+   get_test_results(run_id="<run_id>")
+
+The report includes severity_counts with revenue/activation flows labeled as
+"BLOCKER in revenue flow: checkout" so you can triage at a glance."""
+
+
+@mcp.prompt()
+def debug_failed_case() -> str:
+    return """To investigate a specific test failure:
+
+1. Get the run results to find the failed case:
+   get_test_results(run_id="<run_id>")
+
+   Look for cases with status "fail" or "error". Note the case_id.
+
+2. Re-run in headed mode with full evidence capture:
+   debug_test_case(run_id="<run_id>", case_id="<case_id>")
+
+   This replays the flow with a visible browser, captures per-step screenshots,
+   console logs, and a plain-English "why this failed" explanation with 3 fix suggestions.
+
+3. If the failure is an auth issue (status "waiting_auth"):
+   - Check your auth profile: validate_setup(profile_name="<profile_name>")
+   - Re-save with correct credentials: save_auth_profile(...)
+   - Then retry: run_regression_test(...)"""
 
 
 def run() -> int:

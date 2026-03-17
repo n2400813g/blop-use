@@ -13,20 +13,39 @@ from blop.schemas import FailureCase
 # Deterministic severity scoring
 # ---------------------------------------------------------------------------
 
+_REVENUE_ACTIVATION = {"revenue", "activation"}
+
+
 def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
-    """Return severity string without calling LLM, or None to fall through to Gemini."""
+    """Return severity string without calling LLM, or None to fall through to Gemini.
+
+    Priority order (assertion-first):
+    1. Explicit assertion failure on revenue/activation flow → blocker
+    2. Explicit assertion failure on any flow → high
+    3. Auth block (401/403/auth keywords) → blocker
+    4. 5xx HTTP → blocker
+    5. Uncaught JS crash → blocker
+    6. Step failure on revenue/activation flow → high
+    7. Any step failure → medium
+    """
     if case.status == "pass":
         return "none"
 
-    # Blocker: HTTP 5xx, auth failure, uncaught JS crash
-    network_5xx = any(
-        err.startswith(("5", "500", "502", "503", "504"))
-        for err in case.network_errors
-    )
-    if network_5xx:
+    if case.status == "blocked":
         return "blocker"
 
-    # Auth failure (401/403 in network errors or console)
+    bc = getattr(case, "business_criticality", "other") or "other"
+    assertion_failures = case.assertion_failures or []
+
+    # 1. Explicit assertion failure on revenue/activation flow
+    if assertion_failures and bc in _REVENUE_ACTIVATION:
+        return "blocker"
+
+    # 2. Explicit assertion failure on any flow
+    if assertion_failures:
+        return "high"
+
+    # 3. Auth failure (401/403 in network errors or console)
     auth_failure = any(
         any(kw in err for kw in ("401", "403", "unauthorized", "forbidden"))
         for err in case.network_errors + case.console_errors
@@ -34,7 +53,15 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
     if auth_failure:
         return "blocker"
 
-    # Uncaught JS crash
+    # 4. HTTP 5xx
+    network_5xx = any(
+        err.startswith(("5", "500", "502", "503", "504"))
+        for err in case.network_errors
+    )
+    if network_5xx:
+        return "blocker"
+
+    # 5. Uncaught JS crash
     js_crash = any(
         any(kw in err.lower() for kw in ("uncaught", "typeerror", "referenceerror", "syntaxerror", "crash"))
         for err in case.console_errors
@@ -42,16 +69,11 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
     if js_crash:
         return "blocker"
 
-    if case.status == "blocked":
-        return "blocker"
+    # 6. Step failure on revenue/activation flow
+    if case.status in ("fail", "error") and bc in _REVENUE_ACTIVATION:
+        return "high"
 
-    # High: core CTA assertion failed, form submit broken, pricing/contact URL 404
-    assertion_failures = case.assertion_failures or []
-    high_keywords = ("login", "sign in", "checkout", "payment", "submit", "register", "subscribe")
-    for af in assertion_failures:
-        if any(kw in af.lower() for kw in high_keywords):
-            return "high"
-
+    # 404 on critical routes
     network_404 = any(
         err.startswith("404") and any(kw in err for kw in ("/pricing", "/contact", "/checkout", "/payment"))
         for err in case.network_errors
@@ -59,14 +81,7 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
     if network_404:
         return "high"
 
-    if assertion_failures:
-        return "medium"
-
-    # Low: console warnings only, no assertion failures
-    has_console_warnings = bool(case.console_errors)
-    if has_console_warnings and case.status == "fail":
-        return "medium"
-
+    # 7. Any step failure
     if case.status in ("fail", "error"):
         return "medium"
 
@@ -93,10 +108,10 @@ async def classify_case(case: FailureCase, url: str) -> FailureCase:
     from browser_use.llm import ChatGoogle
     from browser_use.llm.messages import UserMessage
 
-    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.1)
-    console_text = "\n".join(case.console_errors[:10]) or "none"
-    network_text = "\n".join(case.network_errors[:10]) or "none"
-    assertion_text = "\n".join(case.assertion_failures[:5]) or "none"
+    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.1, max_output_tokens=400)
+    console_text = "\n".join(case.console_errors[:3]) or "none"
+    network_text = "\n".join(case.network_errors[:3]) or "none"
+    assertion_text = "\n".join(case.assertion_failures[:3]) or "none"
 
     prompt = f"""You are a QA analyst reviewing a browser test result for {url}.
 
@@ -172,7 +187,7 @@ async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> l
     from browser_use.llm import ChatGoogle
     from browser_use.llm.messages import UserMessage
 
-    llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.3)
+    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.3, max_output_tokens=300)
 
     # Build a summary of failed cases
     failures_text = "\n".join(

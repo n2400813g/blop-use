@@ -6,6 +6,22 @@ from pydantic import BaseModel, Field
 import uuid
 
 
+class StructuredAssertion(BaseModel):
+    """Machine-evaluable assertion captured during recording."""
+    assertion_type: Literal[
+        "text_present",     # expected text is present in element or page body
+        "element_visible",  # element matching target selector/role is visible
+        "url_contains",     # current URL contains expected substring
+        "page_title",       # document.title contains expected substring
+        "count",            # element count equals expected (integer string)
+        "semantic",         # requires LLM/vision evaluation
+    ]
+    target: str | None = None      # CSS selector, ARIA role name, or URL substring
+    expected: str | None = None    # expected text/value/count
+    description: str = ""          # original natural-language form (always kept)
+    negated: bool = False          # if True, assert that condition does NOT hold
+
+
 class AuthProfile(BaseModel):
     profile_name: str
     auth_type: Literal["env_login", "storage_state", "cookie_json"]
@@ -29,6 +45,14 @@ class FlowStep(BaseModel):
     url_before: str | None = None
     url_after: str | None = None
     screenshot_path: str | None = None
+    # Semantic locator fields (captured at record time for stable replay)
+    aria_role: str | None = None           # ARIA role, e.g. "button", "textbox", "link"
+    aria_name: str | None = None           # accessible name at record time
+    aria_snapshot: str | None = None       # compact ARIA subtree JSON (depth 2, max 30 nodes)
+    testid_selector: str | None = None     # e.g. "[data-testid='submit-btn']"
+    label_text: str | None = None          # associated label/placeholder for fill steps
+    # Structured assertion (for assert steps only)
+    structured_assertion: StructuredAssertion | None = None
 
 
 class RecordedFlow(BaseModel):
@@ -39,7 +63,9 @@ class RecordedFlow(BaseModel):
     steps: list[FlowStep]
     created_at: str
     assertions_json: list[str] = []
+    structured_assertions: list[StructuredAssertion] = []
     entry_url: str | None = None
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
 
 
 @dataclass
@@ -90,6 +116,7 @@ class ReplayTrace:
     network_errors: list[str] = field(default_factory=list)
     screenshots: list[str] = field(default_factory=list)
     raw_result: str = ""
+    trace_path: str | None = None
 
 
 class FailureCase(BaseModel):
@@ -108,6 +135,8 @@ class FailureCase(BaseModel):
     step_failure_index: int | None = None
     assertion_failures: list[str] = []
     assertion_results: list[dict] = []
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    trace_path: str | None = None
 
 
 class DiscoverResult(BaseModel):
@@ -131,6 +160,9 @@ class RecordedFlowResult(BaseModel):
     step_count: int
     status: str
     artifacts_dir: str
+
+
+RunStatus = Literal["queued", "running", "waiting_auth", "completed", "failed", "cancelled"]
 
 
 class RunStartedResult(BaseModel):
