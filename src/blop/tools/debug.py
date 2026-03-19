@@ -73,23 +73,22 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
 
 async def _explain_failure(case: FailureCase, flow, url: str) -> str:
     """Generate a plain-English explanation of why the test failed."""
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if not google_api_key or case.status == "pass":
+    from blop.config import check_llm_api_key
+    has_key, _ = check_llm_api_key()
+    if not has_key or case.status == "pass":
         return ""
 
     from blop.prompts import NEXT_ACTIONS_PROMPT
 
-    # Find the failed step description
     step_desc = "unknown"
     step_index = case.step_failure_index or 0
     if flow and flow.steps and step_index < len(flow.steps):
         step_desc = flow.steps[step_index].description
 
     try:
-        from browser_use.llm import ChatGoogle
-        from browser_use.llm.messages import UserMessage
+        from blop.engine.llm_factory import make_planning_llm, make_message
 
-        llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.2)
+        llm = make_planning_llm(temperature=0.2, max_output_tokens=600)
         prompt = NEXT_ACTIONS_PROMPT.format(
             flow_name=case.flow_name,
             goal=flow.goal if flow else case.flow_name,
@@ -100,7 +99,7 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
             console_errors=", ".join(case.console_errors[:3]) or "none",
         )
 
-        response = await llm.ainvoke([UserMessage(content=prompt)])
+        response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:

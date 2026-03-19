@@ -203,3 +203,90 @@ async def test_discover_flows_with_repo_path(tmp_path):
             flows = await discover_flows("https://example.com", repo_path=str(tmp_path))
 
     assert len(flows) >= 3
+
+
+@pytest.mark.asyncio
+async def test_explore_site_inventory_includes_page_structures():
+    """Inventory response includes compact per-page interactive ARIA nodes."""
+    from blop.engine.discovery import explore_site_inventory
+
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com"
+    mock_page.goto = AsyncMock()
+    mock_page.evaluate = AsyncMock(side_effect=[[], [], [], [], []])
+    mock_page.accessibility = MagicMock(
+        snapshot=AsyncMock(
+            return_value={
+                "role": "WebArea",
+                "name": "Example",
+                "children": [
+                    {"role": "button", "name": "Start Free Trial", "children": []},
+                    {"role": "link", "name": "Pricing", "children": []},
+                ],
+            }
+        )
+    )
+
+    mock_context = AsyncMock()
+    mock_context.new_page.return_value = mock_page
+
+    mock_browser = AsyncMock()
+    mock_browser.new_context.return_value = mock_context
+
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+        result = await explore_site_inventory("https://example.com")
+
+    inventory = result["inventory"]
+    assert "page_structures" in inventory
+    assert "https://example.com" in inventory["page_structures"]
+    assert inventory["page_structures"]["https://example.com"][0]["role"] == "button"
+
+
+@pytest.mark.asyncio
+async def test_get_page_structure_returns_interactive_nodes():
+    """Single-page structure tool returns flattened ARIA interactive elements."""
+    from blop.engine.discovery import get_page_structure
+
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com/pricing"
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_function = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+    mock_page.accessibility = MagicMock(
+        snapshot=AsyncMock(
+            return_value={
+                "role": "WebArea",
+                "name": "Pricing",
+                "children": [
+                    {"role": "link", "name": "Upgrade", "children": []},
+                    {"role": "button", "name": "Start", "children": []},
+                ],
+            }
+        )
+    )
+
+    mock_context = AsyncMock()
+    mock_context.new_page.return_value = mock_page
+
+    mock_browser = AsyncMock()
+    mock_browser.new_context.return_value = mock_context
+
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+        result = await get_page_structure(
+            app_url="https://example.com",
+            target_url="https://example.com/pricing",
+        )
+
+    assert result["requested_url"] == "https://example.com/pricing"
+    assert result["interactive_node_count"] == 2
+    assert any(node["name"] == "Upgrade" for node in result["interactive_nodes"])

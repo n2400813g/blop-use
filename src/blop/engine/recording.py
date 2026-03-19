@@ -11,7 +11,73 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from blop.config import BLOP_AGENT_MAX_ACTIONS_PER_STEP, BLOP_AGENT_MAX_FAILURES
 from blop.schemas import FlowStep, StructuredAssertion
+
+# Shared agent instructions used by both recording and goal-fallback regression agents.
+# Kept here so both contexts stay in sync without duplication.
+class BlopActions:
+    """Custom browser actions for common QA patterns (toast assertions, modal dismissal)."""
+
+    @staticmethod
+    async def assert_toast_visible(page, message_substring: str = "") -> str:
+        """Wait up to 5s for a toast/alert/snackbar to appear. Returns 'visible' or 'not_found'."""
+        selectors = [
+            "[role='alert']",
+            "[class*='toast']",
+            "[class*='snackbar']",
+            "[class*='notification']",
+        ]
+        import asyncio as _asyncio
+        for _ in range(10):
+            for sel in selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        text = (await el.inner_text()) or ""
+                        if not message_substring or message_substring.lower() in text.lower():
+                            return "visible"
+                except Exception:
+                    pass
+            await _asyncio.sleep(0.5)
+        return "not_found"
+
+    @staticmethod
+    async def dismiss_modal(page) -> str:
+        """Click the first visible close/dismiss button inside a modal. Returns 'dismissed' or 'no_modal'."""
+        close_selectors = [
+            "[role='dialog'] button[aria-label*='close' i]",
+            "[role='dialog'] button[aria-label*='dismiss' i]",
+            "[role='dialog'] button[aria-label*='cancel' i]",
+            "[class*='modal'] button[aria-label*='close' i]",
+            "[class*='modal'] .close",
+        ]
+        for sel in close_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    return "dismissed"
+            except Exception:
+                pass
+        return "no_modal"
+
+
+SPA_AGENT_RULES = (
+    "IMPORTANT — SPA & web-component rules: "
+    "(1) After clicking a project card or nav link, wait 3–5 seconds before asserting that content is visible — views load asynchronously in SPAs. "
+    "(2) If the page shows a loading spinner or skeleton, wait for it to disappear before proceeding. "
+    "(3) Do NOT retry the same click if the URL has already changed — navigation may have succeeded even if content is still loading. "
+    "(4) If a standard selector fails, try scrolling the element into view, then retry once. "
+    "(5) Some UI elements live inside shadow DOM / web components — if they are not found by normal means, describe them for vision-based interaction. "
+    "(6) If an element is not found, check if it is inside a shadow DOM or web component. "
+    "(7) CANVAS / WEBGL APPS: If the primary UI renders into a <canvas> element (design tools, diagram builders, creative editors, game engines, etc.), "
+    "wait up to 30 seconds for the application toolbar to appear — WebGL and WASM initialisation takes 15–30 seconds. "
+    "A dark or blank canvas is NOT a failure; it means the application is still initialising. "
+    "(8) In canvas-based applications, only assert DOM chrome elements: toolbar buttons, menu bar items, top-level controls, or the canvas element itself. "
+    "Do not attempt to interact with content rendered inside the canvas — it is not in the accessibility tree. "
+    "(9) The canvas application has loaded successfully when at least one actionable toolbar element (e.g. Export, Publish, File menu) is visible in the DOM."
+)
 
 
 async def record_flow(
@@ -24,12 +90,11 @@ async def record_flow(
     """Run a Browser-Use agent for `goal`; capture each action with selector, target_text,
     dom_fingerprint, per-step screenshot, and final assertion steps."""
     from browser_use import Agent, BrowserSession
-    from browser_use.llm import ChatGoogle
     from blop.engine.browser import make_browser_profile
+    from blop.engine.llm_factory import make_agent_llm
     from blop.storage import files as file_store
 
-    google_api_key = os.getenv("GOOGLE_API_KEY", "")
-    llm = ChatGoogle(model="gemini-2.5-flash", temperature=0.7, api_key=google_api_key)
+    llm = make_agent_llm()
     browser_profile = make_browser_profile(headless=headless, storage_state=storage_state)
     browser_session = BrowserSession(browser_profile=browser_profile)
 
@@ -47,7 +112,39 @@ async def record_flow(
     ))
     step_counter += 1
 
-    task = f"Navigate to {app_url} then: {goal}"
+    # Pre-agent discovery: use raw Playwright to extract SPA-internal links
+    # that a browser-use click can't reliably trigger (e.g. React Router cards).
+    # Only run when the goal implies navigating to a sub-page (not a dashboard/list page).
+    # Skip for "create new" flows — those must start from the dashboard, not a pre-resolved URL.
+    _deep_keywords = {"editor", "project", "workspace", "open", "enter", "launch", "canvas"}
+    _create_keywords = {"create", "new project", "new file", "start fresh", "make new"}
+    _is_create_flow = any(kw in goal.lower() for kw in _create_keywords)
+    _needs_deep = not _is_create_flow and any(kw in goal.lower() for kw in _deep_keywords)
+    entry_url_hint: Optional[str] = None
+    if _needs_deep:
+        try:
+            entry_url_hint = await _resolve_spa_entry_url(
+                app_url=app_url,
+                storage_state=storage_state,
+                headless=headless,
+                goal=goal,
+            )
+        except Exception:
+            pass
+    if entry_url_hint and entry_url_hint != app_url:
+        steps.append(FlowStep(
+            step_id=step_counter,
+            action="navigate",
+            value=entry_url_hint,
+            description=f"Navigate to discovered entry URL: {entry_url_hint}",
+            url_after=entry_url_hint,
+        ))
+        step_counter += 1
+        # The browser was already navigated to entry_url_hint by _discover_entry_url.
+        # Tell the agent to start from there — no need to navigate again.
+        task = f"Navigate to {entry_url_hint} then: {goal}"
+    else:
+        task = f"Navigate to {app_url} then: {goal}"
     step_screenshots: list[str] = []
     screenshot_task: Optional[asyncio.Task] = None
     step_idx_counter = [0]
@@ -68,7 +165,31 @@ async def record_flow(
                 pass
 
     try:
-        agent = Agent(task=task, llm=llm, browser_session=browser_session, use_vision=True)
+        agent_kwargs: dict = dict(
+            task=task,
+            llm=llm,
+            browser_session=browser_session,
+            use_vision=True,
+            use_judge=False,
+            max_failures=BLOP_AGENT_MAX_FAILURES,
+            max_actions_per_step=BLOP_AGENT_MAX_ACTIONS_PER_STEP,
+            extend_system_message=(
+                "You are a QA recorder. You MUST take explicit browser actions (click, fill, navigate) "
+                "to complete every step described in the task. "
+                "Do NOT call 'done' until you have visually confirmed that each requested action has been performed. "
+                "After navigating to the URL, always look for and interact with the UI elements described. "
+                + SPA_AGENT_RULES
+            ),
+        )
+        # Attach BlopActions helpers if browser-use Agent supports additional_tools
+        try:
+            agent_kwargs["additional_tools"] = [
+                BlopActions.assert_toast_visible,
+                BlopActions.dismiss_modal,
+            ]
+        except Exception:
+            pass
+        agent = Agent(**agent_kwargs)
         screenshot_task = asyncio.create_task(_poll_screenshots())
 
         try:
@@ -89,7 +210,21 @@ async def record_flow(
         except Exception:
             pass
 
-        # Extract actions from history
+        all_actions = history.model_actions() if hasattr(history, "model_actions") else []
+        if os.getenv("BLOP_DEBUG"):
+            try:
+                with open("/tmp/blop_debug.log", "a") as _dbg:
+                    _dbg.write(f"[blop-debug] agent history: {len(all_actions)} actions, is_done={getattr(history, 'is_done', lambda: '?')()}\n")
+                    for _i, _a in enumerate(all_actions[:5]):
+                        _dbg.write(f"  action[{_i}]: {str(_a)[:120]}\n")
+                    try:
+                        errs = history.errors()
+                        _dbg.write(f"  errors(): {str(errs)[:500]}\n")
+                    except Exception as _ee:
+                        _dbg.write(f"  errors() failed: {_ee}\n")
+                    _dbg.write(f"  history_len: {len(getattr(history, 'history', []))}\n")
+            except Exception:
+                pass
         if hasattr(history, "model_actions"):
             for i, action in enumerate(history.model_actions()):
                 selector: Optional[str] = None
@@ -97,6 +232,7 @@ async def record_flow(
                 target_text: Optional[str] = None
                 url_before: Optional[str] = None
                 url_after: Optional[str] = None
+                interacted_xpath: Optional[str] = None
 
                 # model_actions() returns list[dict] with ALL action keys (most None).
                 # Find the non-None key to get the actual action type.
@@ -117,13 +253,10 @@ async def record_flow(
                         value = str(params["url"])
                         url_after = value
 
-                    # Prefer xpath from interacted element as selector
-                    interacted_xpath: Optional[str] = None
+                    # Keep interacted xpath as a fallback locator only; we prefer semantic selectors.
                     if interacted is not None:
                         try:
                             interacted_xpath = interacted.xpath if hasattr(interacted, "xpath") else None
-                            if interacted_xpath:
-                                selector = interacted_xpath
                             elem_text = (
                                 interacted.get_meaningful_text_for_llm()
                                 if hasattr(interacted, "get_meaningful_text_for_llm")
@@ -171,6 +304,13 @@ async def record_flow(
                         testid_selector, label_text = await _capture_locator_attrs(
                             page_ref, interacted_xpath, mapped
                         )
+                        if testid_selector:
+                            selector = testid_selector
+                        elif not selector:
+                            selector = interacted_xpath
+
+                if _is_brittle_selector(selector):
+                    selector = None
 
                 steps.append(FlowStep(
                     step_id=step_counter,
@@ -203,7 +343,7 @@ async def record_flow(
                 aria_context = await _get_page_aria_context(final_page)
 
                 assertion_steps = await _generate_assertions_from_screenshot(
-                    final_page, goal, google_api_key, aria_context=aria_context
+                    final_page, goal, aria_context=aria_context
                 )
                 for assertion_text, structured in assertion_steps:
                     steps.append(FlowStep(
@@ -218,6 +358,8 @@ async def record_flow(
         except Exception:
             pass
 
+    except Exception:
+        pass
     finally:
         try:
             await browser_session.aclose()
@@ -225,7 +367,7 @@ async def record_flow(
             pass
 
     # Guarantee at least a navigation + assertion
-    if len(steps) == 1:
+    if len(steps) <= 1:
         steps.append(FlowStep(
             step_id=step_counter,
             action="assert",
@@ -239,27 +381,27 @@ async def record_flow(
 async def _generate_assertions_from_screenshot(
     page,
     goal: str,
-    google_api_key: str,
     aria_context: str = "",
 ) -> list[tuple[str, Optional[StructuredAssertion]]]:
-    """Ask Gemini to generate 1-3 structured assertions based on the final page screenshot.
+    """Ask the configured LLM to generate 1-3 structured assertions based on the final page screenshot.
 
     Returns a list of (assertion_text, StructuredAssertion | None) tuples.
     Falls back to plain-string assertions if structured parsing fails.
     """
-    if not google_api_key:
+    from blop.config import check_llm_api_key
+    has_key, _ = check_llm_api_key()
+    if not has_key:
         return [(f"Page shows expected content for: {goal}", None)]
 
     try:
-        from browser_use.llm import ChatGoogle
-        from browser_use.llm.messages import UserMessage
+        from blop.engine.llm_factory import make_planning_llm
 
         img_bytes = await page.screenshot(type="jpeg", quality=85)
         b64 = base64.b64encode(img_bytes).decode()
 
         aria_section = f"\nARIA tree of final page state:\n{aria_context}\n" if aria_context else ""
 
-        llm = ChatGoogle(model="gemini-2.5-flash", api_key=google_api_key, temperature=0.1, max_output_tokens=600)
+        llm = make_planning_llm(temperature=0.1, max_output_tokens=600)
         prompt = f"""Look at this screenshot of a web page after completing: "{goal}"
 {aria_section}
 Generate 1-3 specific, verifiable assertions about what should be visible.
@@ -279,7 +421,8 @@ Example:
   {{"type": "url_contains", "target": null, "expected": "/dashboard", "description": "URL contains /dashboard"}}
 ]
 """
-        response = await llm.ainvoke([UserMessage(content=[
+        from langchain_core.messages import HumanMessage
+        response = await llm.ainvoke([HumanMessage(content=[
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ])])
@@ -453,10 +596,26 @@ def _compute_fingerprint(action: str, selector: Optional[str], target_text: Opti
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
+def _is_brittle_selector(selector: Optional[str]) -> bool:
+    """Identify recorder-only selectors that should not drive strict replay."""
+    if not selector:
+        return False
+    sel = selector.strip().lower()
+    if "data-browser-use-index" in sel:
+        return True
+    if sel.startswith("/") or sel.startswith("xpath="):
+        # Long absolute XPaths with positional indices are highly unstable across renders.
+        if "position()" in sel or "nth" in sel:
+            return True
+        if sel.count("/") > 7:
+            return True
+    return False
+
+
 def _map_action(action_name: str) -> Optional[str]:
     name = action_name.lower().replace("_", "")
     # Actions to skip (no browser interaction to replay)
-    skip = {"done", "extractpagecontent", "extract", "screenshot", "saveaspdf", "searchpage", "findelements"}
+    skip = {"done", "extractpagecontent", "extract", "screenshot", "saveaspdf", "searchpage", "findelements", "scroll", "scrolldown", "scrollup", "scrolltoelement"}
     if name in skip:
         return None
     mapping = {
@@ -474,10 +633,143 @@ def _map_action(action_name: str) -> Optional[str]:
         "uploadfile": "upload",
         "dragdrop": "drag",
         "wait": "wait",
-        "scroll": "scroll",
         "switchtab": "navigate",
     }
     for key, val in mapping.items():
         if key in name:
             return val
     return "click"
+
+
+async def _resolve_spa_entry_url(
+    app_url: str,
+    storage_state: Optional[str],
+    headless: bool,
+    goal: str,
+) -> Optional[str]:
+    """Find the deepest useful entry URL for SPA dashboards.
+
+    Strategy 1: <a href> links pointing to known sub-paths (/editor/, /project/, etc.)
+    Strategy 2: data attributes encoding project/item IDs (data-project-id, data-href)
+    Strategy 3: Intercept history.pushState before clicking card-like elements and
+                capture the URL the SPA navigates to without a full page load.
+    """
+    from playwright.async_api import async_playwright
+    from urllib.parse import urljoin
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--use-gl=swiftshader"],
+        )
+        ctx_kwargs: dict = {}
+        if storage_state:
+            ctx_kwargs["storage_state"] = storage_state
+        context = await browser.new_context(**ctx_kwargs)
+        page = await context.new_page()
+        try:
+            await page.goto(app_url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(5000)  # SPA render settle — extended for canvas/WebGL apps
+
+            # Strategy 1: anchor links pointing to known deep paths
+            sub_path_patterns = [
+                "/editor/", "/project/", "/workspace/", "/video/",
+                "/canvas/", "/document/", "/flow/",
+            ]
+            all_hrefs: list[str] = await page.evaluate("""() =>
+                Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href)
+                    .filter(h => h && !h.endsWith('#') && !h.endsWith('/'))
+            """)
+            for href in all_hrefs:
+                for pattern in sub_path_patterns:
+                    if pattern in href:
+                        return href
+
+            # Strategy 2: data attributes encoding project/item IDs
+            data_link = await page.evaluate("""() => {
+                const candidates = document.querySelectorAll(
+                    '[data-project-id], [data-id], [data-item-id], [data-href]'
+                );
+                for (const el of candidates) {
+                    const href = el.dataset.href || el.dataset.projectId || el.dataset.id;
+                    if (href && href.startsWith('/')) return href;
+                }
+                return null;
+            }""")
+            if data_link:
+                return urljoin(app_url, data_link)
+
+            # Strategy 3: intercept pushState, click first card-like element
+            # React Router / Next.js / Vue Router all use history.pushState
+            await page.evaluate("""() => {
+                window.__blopNavHistory = [];
+                const orig = history.pushState.bind(history);
+                history.pushState = function(...args) {
+                    if (args[2]) window.__blopNavHistory.push(String(args[2]));
+                    return orig(...args);
+                };
+            }""")
+
+            initial_url = page.url
+            card_selectors = [
+                "[data-testid*='project']", "[data-testid*='item']",
+                "[class*='project'][class*='cursor']",
+                "[class*='card'][class*='cursor']",
+                "[class*='item'][class*='cursor']",
+                ".group.relative.cursor-pointer",
+                "[role='gridcell']", "[role='listitem']",
+            ]
+            for sel in card_selectors:
+                try:
+                    el = page.locator(sel).first
+                    if not await el.count():
+                        continue
+
+                    # Before clicking, try to extract href from the element or a child anchor
+                    # to avoid triggering a full page navigation (reload) just to discover the URL.
+                    href_via_dom: Optional[str] = await page.evaluate(
+                        """(selector) => {
+                            const el = document.querySelector(selector);
+                            if (!el) return null;
+                            // Is it an anchor itself?
+                            if (el.tagName === 'A' && el.href) return el.href;
+                            // Does it contain an anchor?
+                            const a = el.querySelector('a[href]');
+                            if (a && a.href) return a.href;
+                            // data-href attribute
+                            if (el.dataset && el.dataset.href) return el.dataset.href;
+                            return null;
+                        }""",
+                        sel,
+                    )
+                    if href_via_dom:
+                        for pattern in sub_path_patterns:
+                            if pattern in href_via_dom:
+                                return href_via_dom
+
+                    # Fallback: actually click and wait for URL change / pushState.
+                    # NOTE: this triggers a full page navigation on anchor-based SPAs —
+                    # acceptable here since this browser context is discarded afterward.
+                    await el.click(timeout=3000)
+                    # Poll for URL change or pushState event (200ms × 20 = 4s)
+                    for _ in range(20):
+                        await page.wait_for_timeout(200)
+                        new_url = page.url
+                        if new_url != initial_url and new_url != app_url:
+                            return new_url
+                        nav_history: list[str] = await page.evaluate("window.__blopNavHistory || []")
+                        if nav_history:
+                            path = nav_history[-1]
+                            if path and path.startswith("/"):
+                                return urljoin(app_url, path)
+                    break
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+        finally:
+            await browser.close()
+
+    return None

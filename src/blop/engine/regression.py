@@ -6,13 +6,45 @@ import base64
 import json
 import os
 import re
+import time
 from typing import Optional, TYPE_CHECKING
 
-from blop.schemas import FailureCase, RecordedFlow, ReplayStepResult, ReplayTrace
+from blop.schemas import FailureCase, RecordedFlow, ReplayStepResult, ReplayTrace, StabilityFingerprint
 from blop.storage import files as file_store
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
+
+
+AUTO_HEAL_MIN_CONFIDENCE = float(os.getenv("BLOP_AUTO_HEAL_MIN_CONFIDENCE", "0.78"))
+AUTO_HEAL_MAX_BEHAVIOR_RISK = float(os.getenv("BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK", "0.25"))
+
+
+def _selector_entropy(selector: Optional[str]) -> float:
+    if not selector:
+        return 1.0
+    # Heuristic: deep CSS chains and nth-child patterns are more brittle.
+    depth = selector.count(" ") + selector.count(">")
+    brittle_tokens = sum(selector.count(t) for t in ("nth-child", ":has(", ":nth-of-type", "[class*="))
+    score = min(1.0, (depth * 0.08) + (brittle_tokens * 0.18))
+    return round(score, 4)
+
+
+def _aria_consistency(step) -> float:
+    score = 0.0
+    if getattr(step, "aria_role", None):
+        score += 0.35
+    if getattr(step, "aria_name", None):
+        score += 0.35
+    if getattr(step, "label_text", None):
+        score += 0.2
+    if getattr(step, "testid_selector", None):
+        score += 0.1
+    return round(min(1.0, score), 4)
+
+
+def _should_auto_heal(repair_confidence: float, behavior_risk: float) -> bool:
+    return repair_confidence >= AUTO_HEAL_MIN_CONFIDENCE and behavior_risk <= AUTO_HEAL_MAX_BEHAVIOR_RISK
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +102,8 @@ async def execute_recorded_flow(
             unrecoverable = False
             deferred_asserts: list[tuple[int, object]] = []  # (step_idx, step) for assert steps
 
+            spa_hints = getattr(flow, "spa_hints", None)
+
             for step_idx, step in enumerate(flow.steps):
                 if step.action == "assert":
                     deferred_asserts.append((step_idx, step))
@@ -83,6 +117,7 @@ async def execute_recorded_flow(
                     case_id=case_id,
                     run_mode=run_mode,
                     trace=trace,
+                    spa_hints=spa_hints,
                 )
                 trace.step_results.append(step_result)
 
@@ -151,46 +186,228 @@ async def _execute_single_step(
     case_id: str,
     run_mode: str,
     trace: ReplayTrace,
+    spa_hints=None,
 ) -> ReplayStepResult:
-    """6-tier fallback: testid → aria_role → by_label → CSS → text → agent repair."""
+    """Tiered fallback: testid → aria_role → by_label → CSS → text → agent repair."""
+    from blop.engine.interaction import click_locator, fill_locator, wait_for_spa_ready
+
+    step_start = time.perf_counter()
     action = step.action
     selector = step.selector
     value = step.value
     target_text = step.target_text
+    base_selector_entropy = _selector_entropy(selector)
+    base_aria_consistency = _aria_consistency(step)
+
+    def _result(
+        *,
+        status: str,
+        replay_mode: str,
+        error: str | None = None,
+        screenshot_path: str | None = None,
+        retry_count: int = 0,
+        repair_confidence: float = 0.0,
+        failure_reason: str | None = None,
+    ) -> ReplayStepResult:
+        elapsed_ms = int((time.perf_counter() - step_start) * 1000)
+        return ReplayStepResult(
+            step_id=step.step_id,
+            action=action,
+            status=status,
+            replay_mode=replay_mode,
+            error=error,
+            screenshot_path=screenshot_path,
+            elapsed_ms=elapsed_ms,
+            retry_count=retry_count,
+            selector_entropy=base_selector_entropy,
+            aria_consistency=base_aria_consistency,
+            repair_confidence=repair_confidence,
+            failure_reason=failure_reason,
+        )
+
+    # Auth redirect patterns — session expiry detected mid-run
+    _AUTH_REDIRECT = ("/login", "/signin", "/sign-in", "/auth", "/account/login", "?redirect=")
+
+    def _reason_from_exception(exc: Exception) -> str:
+        text = str(exc).lower()
+        if "timeout" in text:
+            return "spa_not_ready"
+        if "auth redirect detected" in text:
+            return "auth_expired"
+        if any(
+            kw in text for kw in (
+                "intercept",
+                "outside of the viewport",
+                "receives pointer events",
+                "another element",
+                "not visible",
+            )
+        ):
+            return "click_intercepted"
+        if "strict mode violation" in text or "resolved to" in text:
+            return "ambiguous_locator"
+        if "no node found" in text or "waiting for selector" in text or "not found" in text:
+            return "locator_not_found"
+        return "step_execution_failed"
+
+    async def _pick_locator_candidate(locator, *, allow_ambiguous: bool = False):
+        count = await locator.count()
+        if count == 0:
+            return None, "locator_not_found", None
+
+        limit = min(count, 8)
+        visible = []
+        for idx in range(limit):
+            candidate = locator.nth(idx)
+            try:
+                if await candidate.is_visible():
+                    visible.append(candidate)
+            except Exception:
+                continue
+
+        candidates = visible if visible else [locator.nth(idx) for idx in range(limit)]
+        if len(candidates) == 1:
+            return candidates[0], None, None
+        if allow_ambiguous:
+            return candidates[0], None, None
+        return (
+            None,
+            "ambiguous_locator",
+            f"Locator matched {count} elements; refusing first-match fallback",
+        )
+
+    async def _apply_action(locator):
+        if action == "click":
+            clicked = await click_locator(locator, timeout=5000, allow_force=True)
+            if clicked:
+                return True, None, None
+            return False, "click_intercepted", "Click target was not actionable"
+        if action == "fill":
+            if not value:
+                return False, "invalid_step", "Fill step missing value"
+            filled = await fill_locator(locator, value, timeout=5000)
+            if filled:
+                return True, None, None
+            return False, "fill_failed", "Could not fill target field"
+        if action == "select":
+            if not value:
+                return False, "invalid_step", "Select step missing value"
+            try:
+                await locator.select_option(value)
+                return True, None, None
+            except Exception as exc:
+                return False, _reason_from_exception(exc), str(exc)
+        if action == "upload":
+            if not value:
+                return False, "invalid_step", "Upload step missing file path"
+            try:
+                await locator.set_input_files(value)
+                return True, None, None
+            except Exception as exc:
+                return False, _reason_from_exception(exc), str(exc)
+        if action == "drag":
+            if not value:
+                return False, "invalid_step", "Drag step missing drop selector"
+            drop_target = page.locator(value)
+            drop_count = await drop_target.count()
+            if drop_count == 0:
+                return False, "locator_not_found", "Drag drop target not found"
+            drop_candidate, drop_reason, drop_error = await _pick_locator_candidate(drop_target)
+            if not drop_candidate:
+                return False, drop_reason, drop_error
+            try:
+                await locator.drag_to(drop_candidate)
+                return True, None, None
+            except Exception as exc:
+                return False, _reason_from_exception(exc), str(exc)
+        return False, "unsupported_action", f"Unsupported action: {action}"
+
+    async def _try_locator(locator, replay_mode: str):
+        selected, reason, reason_error = await _pick_locator_candidate(locator)
+        if not selected:
+            return False, reason, reason_error, replay_mode
+        ok, apply_reason, apply_error = await _apply_action(selected)
+        if ok:
+            return True, None, None, replay_mode
+        return False, apply_reason, apply_error, replay_mode
+
+    last_reason: str | None = None
+    last_error: str | None = None
 
     # Tier 0: Navigate steps
     if action == "navigate":
         try:
             nav_url = value or step.description
-            await page.goto(nav_url, wait_until="networkidle", timeout=15000)
+            # Retroactive editor-heavy detection: flows recorded before auto-detection was
+            # added won't have spa_hints.is_editor_heavy set. Re-classify via context graph
+            # archetype so they still get the extended canvas wait without re-recording.
+            _effective_hints = spa_hints
+            if spa_hints and not spa_hints.is_editor_heavy:
+                from blop.engine.context_graph import detect_app_archetype, editor_hints_from_archetype
+                from blop.schemas import SiteInventory
+                _probe = SiteInventory(
+                    app_url=nav_url or "",
+                    routes=[nav_url or ""],
+                    buttons=[],
+                    links=[],
+                    forms=[],
+                    headings=[],
+                    auth_signals=[],
+                    business_signals=[],
+                )
+                _archetype = detect_app_archetype(_probe)
+                _hint_kwargs = editor_hints_from_archetype(_archetype)
+                if _hint_kwargs:
+                    from blop.schemas import SpaHints as _SpaHints
+                    _effective_hints = _SpaHints(**{**spa_hints.model_dump(), **_hint_kwargs})
+            elif spa_hints is None:
+                _effective_hints = None
+
+            nav_timeout = 45000 if (_effective_hints and _effective_hints.is_editor_heavy) else 30000
+            # domcontentloaded is the safe default — networkidle times out on SPAs that have
+            # background polling/websockets. wait_for_spa_ready() below handles SPA settling.
+            await page.goto(nav_url, wait_until="domcontentloaded", timeout=nav_timeout)
+            # Detect silent auth redirect (session expired mid-run)
+            _current = page.url.lower()
+            if any(pat in _current for pat in _AUTH_REDIRECT):
+                return _result(status="fail", replay_mode="selector", error=f"Auth redirect detected: {page.url}")
+            # Wait for SPA to reach a usable state before continuing
+            await wait_for_spa_ready(
+                page,
+                wait_for_selector=_effective_hints.wait_for_selector if _effective_hints else None,
+                wait_for_shadow_selector=_effective_hints.wait_for_shadow_selector if _effective_hints else None,
+                settle_ms=_effective_hints.settle_ms if _effective_hints else 1500,
+                spa_hints=_effective_hints,
+            )
             shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-            return ReplayStepResult(
-                step_id=step.step_id, action=action, status="pass",
-                replay_mode="selector", screenshot_path=shot,
-            )
+            return _result(status="pass", replay_mode="selector", screenshot_path=shot)
         except Exception as e:
-            return ReplayStepResult(
-                step_id=step.step_id, action=action, status="fail",
-                replay_mode="selector", error=str(e),
+            return _result(
+                status="fail",
+                replay_mode="selector",
+                error=str(e),
+                failure_reason=_reason_from_exception(e),
             )
+
+    # Explicit wait steps (supports numeric seconds in value)
+    if action == "wait":
+        try:
+            wait_secs = float(value) if value else max(0.1, float(getattr(step, "wait_after_secs", 0.5)))
+        except Exception:
+            wait_secs = max(0.1, float(getattr(step, "wait_after_secs", 0.5)))
+        await page.wait_for_timeout(int(wait_secs * 1000))
+        shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+        return _result(status="pass", replay_mode="wait", screenshot_path=shot)
 
     # Tier 1: data-testid selector (most stable)
     testid_sel = getattr(step, "testid_selector", None)
     if testid_sel:
         try:
-            el = await page.wait_for_selector(testid_sel, timeout=4000)
-            if el:
-                if action == "click":
-                    await el.click()
-                elif action == "fill" and value:
-                    await el.fill(value)
-                elif action == "select" and value:
-                    await el.select_option(value)
+            ok, reason, err, _ = await _try_locator(page.locator(testid_sel), "testid")
+            if ok:
                 shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="pass",
-                    replay_mode="testid", screenshot_path=shot,
-                )
+                return _result(status="pass", replay_mode="testid", screenshot_path=shot)
+            last_reason, last_error = reason, err
         except Exception:
             pass
 
@@ -199,73 +416,76 @@ async def _execute_single_step(
     aria_name = getattr(step, "aria_name", None)
     if aria_role and aria_name:
         try:
-            loc = page.get_by_role(aria_role, name=aria_name)
-            if await loc.count() > 0:
-                first = loc.first
-                if action == "click":
-                    await first.click()
-                elif action == "fill" and value:
-                    await first.fill(value)
-                elif action == "select" and value:
-                    await first.select_option(value)
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="pass",
-                    replay_mode="aria_role", screenshot_path=shot,
+            for exact_mode in (True, False):
+                loc = page.get_by_role(aria_role, name=aria_name, exact=exact_mode)
+                ok, reason, err, _ = await _try_locator(
+                    loc,
+                    "aria_role_exact" if exact_mode else "aria_role_fuzzy",
                 )
+                if ok:
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    return _result(
+                        status="pass",
+                        replay_mode="aria_role_exact" if exact_mode else "aria_role",
+                        screenshot_path=shot,
+                    )
+                if reason != "locator_not_found":
+                    last_reason, last_error = reason, err
         except Exception:
             pass
 
     # Tier 3: by-label (fill actions only)
     label_text = getattr(step, "label_text", None)
-    if action == "fill" and label_text and value:
+    if action in ("fill", "upload") and label_text and value:
         try:
-            loc = page.get_by_label(label_text, exact=False)
-            if await loc.count() > 0:
-                await loc.first.fill(value)
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="pass",
-                    replay_mode="by_label", screenshot_path=shot,
+            for exact_mode in (True, False):
+                loc = page.get_by_label(label_text, exact=exact_mode)
+                ok, reason, err, _ = await _try_locator(
+                    loc,
+                    "by_label_exact" if exact_mode else "by_label",
                 )
+                if ok:
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    return _result(
+                        status="pass",
+                        replay_mode="by_label_exact" if exact_mode else "by_label",
+                        screenshot_path=shot,
+                    )
+                if reason != "locator_not_found":
+                    last_reason, last_error = reason, err
         except Exception:
             pass
 
     # Tier 4: CSS selector
     if selector:
         try:
-            el = await page.wait_for_selector(selector, timeout=5000)
-            if el:
-                if action == "click":
-                    await el.click()
-                elif action == "fill" and value:
-                    await el.fill(value)
-                elif action == "select" and value:
-                    await el.select_option(value)
+            ok, reason, err, _ = await _try_locator(page.locator(selector), "selector")
+            if ok:
                 shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="pass",
-                    replay_mode="selector", screenshot_path=shot,
-                )
+                return _result(status="pass", replay_mode="selector", screenshot_path=shot)
+            if reason:
+                last_reason, last_error = reason, err
         except Exception:
             pass
 
     # Tier 5: Text-based lookup
     if target_text:
         try:
-            el = page.get_by_text(target_text, exact=False)
-            count = await el.count()
-            if count > 0:
-                first = el.first
-                if action == "click":
-                    await first.click()
-                elif action == "fill" and value:
-                    await first.fill(value)
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="pass",
-                    replay_mode="text_lookup", screenshot_path=shot,
+            for exact_mode in (True, False):
+                text_loc = page.get_by_text(target_text, exact=exact_mode)
+                ok, reason, err, _ = await _try_locator(
+                    text_loc,
+                    "text_lookup_exact" if exact_mode else "text_lookup_fuzzy",
                 )
+                if ok:
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    return _result(
+                        status="pass",
+                        replay_mode="text_lookup_exact" if exact_mode else "text_lookup",
+                        screenshot_path=shot,
+                    )
+                if reason != "locator_not_found":
+                    last_reason, last_error = reason, err
         except Exception:
             pass
 
@@ -273,7 +493,27 @@ async def _execute_single_step(
     if run_mode in ("hybrid", "explore"):
         trace.run_mode = "hybrid_repair"
         repair_result = await repair_step_with_agent(step, page)
+        if repair_result and repair_result.get("_quota_error"):
+            return _result(
+                status="fail",
+                replay_mode="agent_repair",
+                error="Gemini quota/rate-limit exceeded",
+                failure_reason="llm_quota_error",
+            )
         if repair_result:
+            repair_confidence = float(repair_result.get("repair_confidence", 0.6))
+            behavior_risk = float(repair_result.get("behavior_risk", 0.35))
+            if not _should_auto_heal(repair_confidence, behavior_risk):
+                return _result(
+                    status="fail",
+                    replay_mode="agent_repair",
+                    error=(
+                        "Repair proposed but not auto-applied (confidence/risk threshold not met): "
+                        f"confidence={repair_confidence:.2f}, risk={behavior_risk:.2f}"
+                    ),
+                    repair_confidence=repair_confidence,
+                    failure_reason="repair_rejected",
+                )
             locator_type = repair_result.get("repaired_locator_type", "css")
             repaired_selector = repair_result.get("repaired_selector")
             repaired_role = repair_result.get("repaired_role")
@@ -283,44 +523,65 @@ async def _execute_single_step(
             try:
                 el = None
                 if locator_type == "role" and repaired_role and repaired_name:
-                    loc = page.get_by_role(repaired_role, name=repaired_name)
-                    if await loc.count() > 0:
-                        el = loc.first
+                    loc = page.get_by_role(repaired_role, name=repaired_name, exact=True)
+                    el, _, _ = await _pick_locator_candidate(loc)
+                    if el is None:
+                        loc = page.get_by_role(repaired_role, name=repaired_name, exact=False)
+                        el, _, _ = await _pick_locator_candidate(loc)
                 elif locator_type == "label" and repaired_name:
                     loc = page.get_by_label(repaired_name, exact=False)
-                    if await loc.count() > 0:
-                        el = loc.first
+                    el, _, _ = await _pick_locator_candidate(loc)
                 elif locator_type == "text" and repaired_name:
                     loc = page.get_by_text(repaired_name, exact=False)
-                    if await loc.count() > 0:
-                        el = loc.first
+                    el, _, _ = await _pick_locator_candidate(loc)
                 elif repaired_selector:
-                    el = await page.wait_for_selector(repaired_selector, timeout=5000)
+                    loc = page.locator(repaired_selector)
+                    el, _, _ = await _pick_locator_candidate(loc)
 
                 if el:
-                    if repaired_action == "click":
-                        await el.click()
-                    elif repaired_action == "fill" and repaired_value:
-                        await el.fill(repaired_value)
+                    original_action = action
+                    original_value = value
+                    try:
+                        action = repaired_action
+                        value = repaired_value
+                        ok, repaired_reason, repaired_error = await _apply_action(el)
+                        if not ok:
+                            return _result(
+                                status="fail",
+                                replay_mode="agent_repair",
+                                error=repaired_error or "Repaired action failed",
+                                repair_confidence=repair_confidence,
+                                failure_reason=repaired_reason or "repair_failed",
+                            )
+                    finally:
+                        action = original_action
+                        value = original_value
                 else:
                     from blop.engine.vision import click_by_vision
                     desc = target_text or step.description
                     await click_by_vision(page, desc)
 
                 shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="repaired",
-                    replay_mode="agent_repair", screenshot_path=shot,
+                return _result(
+                    status="repaired",
+                    replay_mode="agent_repair",
+                    screenshot_path=shot,
+                    repair_confidence=repair_confidence,
                 )
             except Exception as e:
-                return ReplayStepResult(
-                    step_id=step.step_id, action=action, status="fail",
-                    replay_mode="agent_repair", error=str(e),
+                return _result(
+                    status="fail",
+                    replay_mode="agent_repair",
+                    error=str(e),
+                    repair_confidence=repair_confidence,
+                    failure_reason=_reason_from_exception(e),
                 )
 
-    return ReplayStepResult(
-        step_id=step.step_id, action=action, status="fail",
-        replay_mode="selector", error="No selector, text, or repair succeeded",
+    return _result(
+        status="fail",
+        replay_mode="selector",
+        error=last_error or "No selector, text, or repair succeeded",
+        failure_reason=last_reason or "locator_not_found",
     )
 
 
@@ -364,6 +625,10 @@ async def repair_step_with_agent(step, page: "Page") -> Optional[dict]:
             current_url=current_url,
             aria_section=aria_section,
         )
+        prompt += (
+            "\nReturn JSON with repair_confidence (0..1) and behavior_risk (0..1) "
+            "in addition to any repaired locator/action fields."
+        )
 
         llm = ChatGoogle(model=model, api_key=google_api_key, temperature=0.2, max_output_tokens=300)
         response = await llm.ainvoke([UserMessage(content=[
@@ -374,8 +639,10 @@ async def repair_step_with_agent(step, page: "Page") -> Optional[dict]:
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             return json.loads(m.group())
-    except Exception:
-        pass
+    except Exception as e:
+        _e = str(e).lower()
+        if "429" in _e or "quota" in _e or "resource_exhausted" in _e or "rate" in _e:
+            return {"_quota_error": True}
 
     return None
 
@@ -442,10 +709,17 @@ async def _evaluate_assertions(page: "Page", deferred_asserts: list) -> list[dic
         texts = [t for _, t in semantic_batch]
         try:
             vision_results = await assert_all_by_vision(page, texts)
-        except Exception:
-            vision_results = [False] * len(texts)
-        for (step_obj, _), passed in zip(semantic_batch, vision_results):
-            results.append({"step": step_obj, "passed": passed, "eval_type": "vision_batch"})
+            for (step_obj, _), passed in zip(semantic_batch, vision_results):
+                results.append({"step": step_obj, "passed": passed, "eval_type": "vision_batch"})
+        except Exception as e:
+            _e = str(e).lower()
+            if "429" in _e or "quota" in _e or "resource_exhausted" in _e or "rate" in _e:
+                # Quota/rate-limit error — mark assertions as failed (not silently passed)
+                for step_obj, _ in semantic_batch:
+                    results.append({"step": step_obj, "passed": False, "eval_type": "quota_error"})
+            else:
+                for step_obj, _ in semantic_batch:
+                    results.append({"step": step_obj, "passed": False, "eval_type": "vision_batch"})
 
     return results
 
@@ -509,6 +783,7 @@ def _trace_to_failure_case(
         r["assertion"] for r in trace.assertion_results if not r.get("passed", True)
     ]
     failed_steps = [r for r in trace.step_results if r.status == "fail"]
+    failure_reason_codes = sorted({r.failure_reason for r in failed_steps if r.failure_reason})
 
     if trace.network_errors:
         status: str = "fail"
@@ -517,16 +792,56 @@ def _trace_to_failure_case(
     else:
         status = "pass"
 
-    # Detect auth-blocked scenarios
-    auth_kws = ("401", "403", "unauthorized", "forbidden", "login required")
-    if any(kw in trace.raw_result.lower() or any(kw in e.lower() for e in trace.console_errors)
-           for kw in auth_kws):
+    # Detect auth-blocked scenarios: check raw_result and step errors only.
+    # Console errors are intentionally excluded — background resource 401s (analytics,
+    # CDN, third-party APIs) fire on otherwise-authenticated pages and would produce
+    # false positives. Actual auth redirects are caught by the navigate-step check
+    # which sets step.error = "Auth redirect detected: <url>".
+    auth_kws = ("401", "403", "unauthorized", "forbidden", "login required", "auth redirect detected")
+    _auth_blocked = (
+        ("auth_expired" in failure_reason_codes)
+        or any(kw in trace.raw_result.lower() for kw in auth_kws)
+        or any(r.error and any(kw in r.error.lower() for kw in auth_kws) for r in trace.step_results)
+    )
+    if _auth_blocked:
         status = "blocked"
+        if not trace.raw_result:
+            trace.raw_result = (
+                "Session expired mid-run. Re-run after refreshing auth profile "
+                "with capture_auth_session."
+            )
 
     repro: list[str] = []
     for r in trace.step_results:
         if r.status in ("fail",):
             repro.append(f"Step {r.step_id} ({r.action}) failed via {r.replay_mode}: {r.error or 'unknown'}")
+
+    fingerprints: list[StabilityFingerprint] = []
+    repair_confidences: list[float] = []
+    for r in trace.step_results:
+        drift = min(1.0, max(0.0, (r.selector_entropy * 0.6) + (r.retry_count * 0.1) - (r.aria_consistency * 0.3)))
+        fingerprints.append(
+            StabilityFingerprint(
+                selector_entropy=r.selector_entropy,
+                aria_consistency=r.aria_consistency,
+                latency_ms=r.elapsed_ms,
+                retry_count=r.retry_count,
+                drift_score=round(drift, 4),
+            )
+        )
+        if r.repair_confidence > 0:
+            repair_confidences.append(r.repair_confidence)
+
+    avg_repair_confidence = (
+        round(sum(repair_confidences) / len(repair_confidences), 4)
+        if repair_confidences
+        else 0.0
+    )
+    healing_decision = "none"
+    if any(r.status == "repaired" for r in trace.step_results):
+        healing_decision = "auto_heal"
+    elif any((r.error or "").startswith("Repair proposed but not auto-applied") for r in trace.step_results):
+        healing_decision = "propose_patch"
 
     return FailureCase(
         case_id=case_id,
@@ -535,6 +850,7 @@ def _trace_to_failure_case(
         flow_name=flow.flow_name,
         status=status,
         severity="none",
+        failure_reason_codes=failure_reason_codes,
         repro_steps=repro,
         console_errors=trace.console_errors[:20],
         network_errors=trace.network_errors[:20],
@@ -545,6 +861,9 @@ def _trace_to_failure_case(
         assertion_failures=assertion_failures,
         assertion_results=trace.assertion_results,
         trace_path=trace.trace_path,
+        repair_confidence=avg_repair_confidence,
+        stability_fingerprints=fingerprints,
+        healing_decision=healing_decision,
     )
 
 
@@ -568,14 +887,16 @@ async def execute_flow(
     Uses hybrid step-by-step replay by default (run_mode='hybrid').
     Falls back to full goal-replay agent when run_mode='goal_fallback'.
     """
-    if run_mode != "goal_fallback" and flow.steps:
+    # Per-flow override takes precedence over the run-level run_mode
+    effective_mode = getattr(flow, "run_mode_override", None) or run_mode
+    if effective_mode != "goal_fallback" and flow.steps:
         return await execute_recorded_flow(
             flow=flow,
             run_id=run_id,
             case_id=case_id,
             storage_state=storage_state,
             headless=False if verbose else headless,
-            run_mode=run_mode,
+            run_mode=effective_mode,
         )
 
     return await _goal_fallback(
@@ -630,7 +951,17 @@ async def _goal_fallback(
                 f"email={_username} password={_password} (login URL: {_login_url}). "
                 f"Do NOT create a new account — log in with the provided credentials."
             )
-        agent = Agent(task=task, llm=llm, browser_session=browser_session, use_vision=True)
+        from blop.engine.recording import SPA_AGENT_RULES
+        _is_heavy = getattr(flow, "spa_hints", None) and getattr(flow.spa_hints, "is_editor_heavy", False)
+        _system_msg = SPA_AGENT_RULES
+        if _is_heavy:
+            _system_msg += (
+                " IMPORTANT: This flow targets a canvas/WebGL-heavy application. "
+                "Wait patiently — up to 45 seconds — for the canvas view to initialise before declaring failure. "
+                "Only assert on DOM toolbar elements, never on canvas content."
+            )
+        agent = Agent(task=task, llm=llm, browser_session=browser_session, use_vision=True,
+                      extend_system_message=_system_msg)
 
         screenshot_task: Optional[asyncio.Task] = None
         step_idx = 0
@@ -669,18 +1000,33 @@ async def _goal_fallback(
             # model_dump() includes ALL action type keys (most None) — find the non-None one
             raw_result = ""
             done_success = True
+            done_found = False
             if hasattr(history, "model_actions"):
-                for action in reversed(history.model_actions()):
-                    done_val = action.get("done")
-                    if done_val is not None:
-                        if isinstance(done_val, dict):
-                            raw_result = str(done_val.get("text") or done_val)
-                            done_success = bool(done_val.get("success", True))
-                        else:
-                            raw_result = str(done_val)
-                        break
+                try:
+                    for action in reversed(history.model_actions()):
+                        done_val = action.get("done")
+                        if done_val is not None:
+                            if isinstance(done_val, dict):
+                                raw_result = str(done_val.get("text") or done_val)
+                                done_success = bool(done_val.get("success", True))
+                            else:
+                                raw_result = str(done_val)
+                            done_found = True
+                            break
+                except Exception:
+                    pass
             if not raw_result:
                 raw_result = str(history.final_result()) if hasattr(history, "final_result") else str(history)
+
+            # When no done action was found, fall back to keyword scanning of raw_result.
+            # This catches cases where the agent silently ended without a done action.
+            if not done_found:
+                _kw_fail = any(w in raw_result.lower() for w in (
+                    "error", "fail", "broken", "exception", "crash",
+                    "404", "500", "unable", "could not", "cannot",
+                ))
+                if _kw_fail:
+                    done_success = False
 
             # Trust the agent's done_success boolean as the primary signal.
             # Additionally catch hard browser-level failures (404, error pages)
@@ -766,10 +1112,16 @@ async def run_flows(
     max_steps: int = 50,
     run_mode: str = "hybrid",
 ) -> list[FailureCase]:
-    """Execute all flows in parallel (semaphore=5)."""
+    """Execute all flows in parallel (semaphore=3 with tracing, 5 without)."""
     import uuid as _uuid
 
-    semaphore = asyncio.Semaphore(5)
+    # Playwright tracing with DOM snapshots is memory-intensive; reduce concurrency
+    # whenever at least one flow will execute in step-replay mode.
+    _tracing_active = any(
+        (getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback"
+        for flow in flows
+    )
+    semaphore = asyncio.Semaphore(3 if _tracing_active else 5)
 
     async def run_one(flow: RecordedFlow) -> FailureCase:
         async with semaphore:

@@ -67,6 +67,29 @@ Return ONLY a JSON object:
 If the element is not visible, set repaired_selector to null and repaired_role to null."""
 
 
+REMEDIATION_PROMPT = """You are a senior QA engineer drafting a bug report and remediation plan for a recurring incident cluster.
+
+Cluster title: {title}
+Severity: {severity}
+Affected flows: {affected_flows}
+Criticality buckets: {criticality_buckets}
+Evidence refs: {evidence}
+Console errors: {console_errors}
+Network errors: {network_errors}
+
+Generate a remediation draft with the following fields:
+- issue_body: 2-3 sentence description of what is failing and the likely user impact
+- fix_hypotheses: list of exactly 3 concrete fix hypotheses ordered by likelihood
+- owner_hint: which team or domain likely owns this (e.g. "Frontend team — checkout UI", "Backend team — payment API")
+
+Return ONLY a JSON object:
+{{
+  "issue_body": "...",
+  "fix_hypotheses": ["Fix 1", "Fix 2", "Fix 3"],
+  "owner_hint": "..."
+}}"""
+
+
 NEXT_ACTIONS_PROMPT = """You are a QA engineer explaining a test failure in plain English.
 
 Test flow: {flow_name}

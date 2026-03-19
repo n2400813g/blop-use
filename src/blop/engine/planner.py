@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from blop.config import BLOP_DISCOVERY_MAX_PAGES
+
 
 @dataclass
 class ExecutionIntent:
@@ -16,7 +18,19 @@ class ExecutionIntent:
     business_goal: str | None = None
     priorities: list[str] = field(default_factory=list)
     max_depth: int = 2
-    run_mode: Literal["explore", "hybrid", "strict"] = "hybrid"
+    max_pages: int = BLOP_DISCOVERY_MAX_PAGES
+    run_mode: Literal["hybrid", "strict_steps", "goal_fallback"] = "hybrid"
+
+
+def normalize_run_mode(raw_mode: str | None) -> Literal["hybrid", "strict_steps", "goal_fallback"]:
+    """Map legacy aliases to the canonical run mode values used by replay."""
+    mode = (raw_mode or "hybrid").strip().lower()
+    if mode in {"strict", "strict_steps"}:
+        return "strict_steps"
+    if mode in {"goal", "goal_fallback", "fallback"}:
+        return "goal_fallback"
+    # "explore" is currently a hybrid replay variant with repair enabled.
+    return "hybrid"
 
 
 async def parse_command(
@@ -48,9 +62,9 @@ async def parse_command(
 
     # Determine run_mode
     if "strict" in cmd_lower:
-        run_mode: Literal["explore", "hybrid", "strict"] = "strict"
-    elif any(w in cmd_lower for w in ("explore", "discover")):
-        run_mode = "explore"
+        run_mode = "strict_steps"
+    elif any(w in cmd_lower for w in ("goal fallback", "goal_fallback", "fallback to goal")):
+        run_mode = "goal_fallback"
     else:
         run_mode = "hybrid"
 
@@ -61,6 +75,11 @@ async def parse_command(
     # Extract max_depth
     depth_match = re.search(r"depth[=:\s]+(\d+)", cmd_lower)
     max_depth = int(depth_match.group(1)) if depth_match else 2
+    max_depth = max(1, min(max_depth, 5))
+
+    pages_match = re.search(r"(?:max[_\s-]?pages|pages)[=:\s]+(\d+)", cmd_lower)
+    max_pages = int(pages_match.group(1)) if pages_match else BLOP_DISCOVERY_MAX_PAGES
+    max_pages = max(1, min(max_pages, 100))
 
     # Extract business goal from patterns like "goal: ..." or "focus on ..."
     business_goal: str | None = None
@@ -79,5 +98,6 @@ async def parse_command(
         business_goal=business_goal,
         priorities=priorities,
         max_depth=max_depth,
-        run_mode=run_mode,
+        max_pages=max_pages,
+        run_mode=normalize_run_mode(run_mode),
     )

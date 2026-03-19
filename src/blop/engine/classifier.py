@@ -16,6 +16,66 @@ from blop.schemas import FailureCase
 _REVENUE_ACTIVATION = {"revenue", "activation"}
 
 
+_SPA_TIMEOUT_KEYWORDS = ("timeout", "waiting for selector", "element not found", "no element matching")
+_SPA_GOAL_KEYWORDS = ("editor", "project", "workspace", "canvas", "dashboard", "open", "enter", "video")
+
+
+def classify_failure_class(case: FailureCase) -> tuple[Optional[str], float]:
+    """Classify the root cause of a failure without an LLM call.
+
+    Returns a failure_class string or None if classification is ambiguous.
+    """
+    if case.status == "pass":
+        return None, 0.0
+
+    reason_codes = set(getattr(case, "failure_reason_codes", []) or [])
+
+    # Auth failures
+    auth_kws = ("401", "403", "unauthorized", "forbidden", "auth redirect detected", "login required")
+    _auth_blocked = (
+        "auth_expired" in reason_codes
+        or "auth_redirect" in reason_codes
+        or case.status == "blocked"
+        or any(any(kw in e.lower() for kw in auth_kws) for e in case.console_errors + case.network_errors)
+        or any(kw in case.raw_result.lower() for kw in auth_kws)
+    )
+    if _auth_blocked:
+        return "auth_failure", 0.92
+
+    fragility_codes = {
+        "ambiguous_locator",
+        "locator_not_found",
+        "click_intercepted",
+        "spa_not_ready",
+        "repair_rejected",
+        "llm_quota_error",
+    }
+    if reason_codes.intersection(fragility_codes):
+        return "test_fragility", 0.81
+
+    # Test fragility: selector/timeout failure on an SPA-navigation goal
+    error_text = " ".join([
+        case.raw_result.lower(),
+        *[r.lower() for r in case.repro_steps],
+        *[e.lower() for e in case.console_errors[:5]],
+    ])
+    has_timeout_error = any(kw in error_text for kw in _SPA_TIMEOUT_KEYWORDS)
+    has_spa_goal = any(kw in case.flow_name.lower() for kw in _SPA_GOAL_KEYWORDS)
+    # Failure very early in a hybrid replay = navigation/loading issue, not product bug
+    early_hybrid_fail = (
+        case.replay_mode == "hybrid_repair"
+        and case.step_failure_index is not None
+        and case.step_failure_index <= 2
+    )
+    if (has_timeout_error and has_spa_goal) or early_hybrid_fail:
+        return "test_fragility", 0.78
+
+    if case.status in ("fail", "error"):
+        return "product_bug", 0.55
+
+    return None, 0.0
+
+
 def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
     """Return severity string without calling LLM, or None to fall through to Gemini.
 
@@ -93,22 +153,32 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 async def classify_case(case: FailureCase, url: str) -> FailureCase:
-    """Assign severity and repro_steps. Uses deterministic rules first; Gemini fallback."""
-    # Deterministic pass
+    """Assign severity, failure_class, and repro_steps. Deterministic rules first; Gemini fallback."""
+    # Always classify root cause
+    if case.failure_class is None:
+        inferred_class, inferred_conf = classify_failure_class(case)
+        case.failure_class = inferred_class
+        case.failure_class_confidence = inferred_conf
+
+    # Deterministic severity pass
     det_severity = classify_failure_deterministic(case)
     if det_severity is not None:
         case.severity = det_severity
         return case
 
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if not google_api_key:
+    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    has_key = (
+        (provider == "google" and os.getenv("GOOGLE_API_KEY"))
+        or (provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"))
+        or (provider == "openai" and os.getenv("OPENAI_API_KEY"))
+    )
+    if not has_key:
         case.severity = "medium" if case.status == "fail" else "high"
         return case
 
-    from browser_use.llm import ChatGoogle
-    from browser_use.llm.messages import UserMessage
+    from blop.engine.llm_factory import make_planning_llm, make_message
 
-    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.1, max_output_tokens=400)
+    llm = make_planning_llm(temperature=0.1, max_output_tokens=400)
     console_text = "\n".join(case.console_errors[:3]) or "none"
     network_text = "\n".join(case.network_errors[:3]) or "none"
     assertion_text = "\n".join(case.assertion_failures[:3]) or "none"
@@ -130,21 +200,31 @@ Severity levels:
 - low: Minor issue, cosmetic or edge case
 - none: No real issue found
 
+Failure class:
+- product_bug: The application itself is broken
+- test_fragility: Selector/timing mismatch, not a product bug (e.g. SPA loading lag, shadow DOM)
+- auth_failure: Session expired or credentials invalid
+- env_issue: Network, infra, or environment problem
+
 Return JSON only:
 {{
   "severity": "blocker|high|medium|low|none",
+  "failure_class": "product_bug|test_fragility|auth_failure|env_issue",
   "repro_steps": ["step 1", "step 2"],
   "summary": "one-line description"
 }}"""
 
     try:
-        response = await llm.ainvoke([UserMessage(content=prompt)])
+        response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             result = json.loads(m.group())
             case.severity = result.get("severity", "medium")
             case.repro_steps = result.get("repro_steps", [])
+            if case.failure_class is None and result.get("failure_class"):
+                case.failure_class = result["failure_class"]
+                case.failure_class_confidence = 0.7
     except Exception:
         case.severity = "medium" if case.status == "fail" else "high"
 
@@ -178,16 +258,18 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
 
 
 async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> list[str]:
-    from blop.prompts import NEXT_ACTIONS_PROMPT
-
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if not google_api_key:
+    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    has_key = (
+        (provider == "google" and os.getenv("GOOGLE_API_KEY"))
+        or (provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"))
+        or (provider == "openai" and os.getenv("OPENAI_API_KEY"))
+    )
+    if not has_key:
         return []
 
-    from browser_use.llm import ChatGoogle
-    from browser_use.llm.messages import UserMessage
+    from blop.engine.llm_factory import make_planning_llm, make_message
 
-    llm = ChatGoogle(model="gemini-1.5-flash", api_key=google_api_key, temperature=0.3, max_output_tokens=300)
+    llm = make_planning_llm(temperature=0.3, max_output_tokens=300)
 
     # Build a summary of failed cases
     failures_text = "\n".join(
@@ -203,7 +285,7 @@ List 3 concrete fix actions. Return only a JSON array:
 ["Fix action 1", "Fix action 2", "Fix action 3"]"""
 
     try:
-        response = await llm.ainvoke([UserMessage(content=prompt)])
+        response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\[.*\]", text, re.DOTALL)
         if m:

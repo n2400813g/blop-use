@@ -30,15 +30,16 @@ async def test_run_regression_creates_queued_run():
     mock_create_run = AsyncMock()
     mock_update_status = AsyncMock()
 
-    with patch.dict(os.environ, {}):
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
         with patch("blop.storage.sqlite.create_run", mock_create_run):
-            with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
-                with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
-                    with patch("asyncio.create_task"):
-                        result = await run_regression_test(
-                            app_url="https://example.com",
-                            flow_ids=["flow1", "flow2"],
-                        )
+            with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
+                    with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
+                        with patch("asyncio.create_task"):
+                            result = await run_regression_test(
+                                app_url="https://example.com",
+                                flow_ids=["flow1", "flow2"],
+                            )
 
     assert result["status"] == "queued"
     assert result["flow_count"] == 2
@@ -57,16 +58,18 @@ async def test_auth_resolution_failure_returns_waiting_auth():
         login_url="https://example.com/login",
     )
 
-    with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
-        with patch("blop.engine.auth.resolve_storage_state", side_effect=Exception("Credentials not set")):
-            with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
-                with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
-                    with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
-                        result = await run_regression_test(
-                            app_url="https://example.com",
-                            flow_ids=["flow1"],
-                            profile_name="prod",
-                        )
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
+            with patch("blop.engine.auth.resolve_storage_state", side_effect=Exception("Credentials not set")):
+                with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+                        with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
+                            with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
+                                result = await run_regression_test(
+                                    app_url="https://example.com",
+                                    flow_ids=["flow1"],
+                                    profile_name="prod",
+                                )
 
     assert result["status"] == "waiting_auth"
     assert "message" in result

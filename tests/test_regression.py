@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,16 @@ def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFl
     )
 
 
+def _mock_browser_use():
+    """Create a mock browser_use module that avoids display detection."""
+    mock_bu = MagicMock()
+    mock_bu.Agent = MagicMock()
+    mock_bu.BrowserSession = MagicMock()
+    mock_bu.llm.ChatGoogle = MagicMock()
+    mock_bu.llm.messages.UserMessage = MagicMock()
+    return mock_bu
+
+
 @pytest.mark.asyncio
 async def test_execute_flow_pass():
     """Flow returns pass status when result has no error keywords."""
@@ -40,21 +51,24 @@ async def test_execute_flow_pass():
     mock_session.context = None
     mock_session.aclose = AsyncMock()
 
+    mock_bu = _mock_browser_use()
+    mock_bu.Agent.return_value = mock_agent
+    mock_bu.BrowserSession.return_value = mock_session
+
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch("browser_use.Agent", return_value=mock_agent):
-            with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("blop.engine.browser.make_browser_profile"):
-                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
-                        flow = make_flow()
-                        case = await execute_flow(
-                            flow=flow,
-                            app_url="https://example.com",
-                            run_id="run1",
-                            case_id="case1",
-                            storage_state=None,
-                            headless=True,
-                            run_mode="goal_fallback",
-                        )
+        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+            with patch("blop.engine.browser.make_browser_profile"):
+                with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                    flow = make_flow()
+                    case = await execute_flow(
+                        flow=flow,
+                        app_url="https://example.com",
+                        run_id="run1",
+                        case_id="case1",
+                        storage_state=None,
+                        headless=True,
+                        run_mode="goal_fallback",
+                    )
 
     assert case.status == "pass"
     assert case.flow_id == "flow1"
@@ -75,21 +89,24 @@ async def test_execute_flow_fail_on_error_keyword():
     mock_session.context = None
     mock_session.aclose = AsyncMock()
 
+    mock_bu = _mock_browser_use()
+    mock_bu.Agent.return_value = mock_agent
+    mock_bu.BrowserSession.return_value = mock_session
+
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch("browser_use.Agent", return_value=mock_agent):
-            with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("blop.engine.browser.make_browser_profile"):
-                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
-                        flow = make_flow()
-                        case = await execute_flow(
-                            flow=flow,
-                            app_url="https://example.com",
-                            run_id="run1",
-                            case_id="case1",
-                            storage_state=None,
-                            headless=True,
-                            run_mode="goal_fallback",
-                        )
+        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+            with patch("blop.engine.browser.make_browser_profile"):
+                with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                    flow = make_flow()
+                    case = await execute_flow(
+                        flow=flow,
+                        app_url="https://example.com",
+                        run_id="run1",
+                        case_id="case1",
+                        storage_state=None,
+                        headless=True,
+                        run_mode="goal_fallback",
+                    )
 
     assert case.status == "fail"
 
@@ -109,20 +126,23 @@ async def test_run_flows_parallel():
     mock_session.context = None
     mock_session.aclose = AsyncMock()
 
+    mock_bu = _mock_browser_use()
+    mock_bu.Agent.return_value = mock_agent
+    mock_bu.BrowserSession.return_value = mock_session
+
     flows = [make_flow(f"flow{i}", f"Goal {i}") for i in range(3)]
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch("browser_use.Agent", return_value=mock_agent):
-            with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("blop.engine.browser.make_browser_profile"):
-                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
-                        cases = await run_flows(
-                            flows=flows,
-                            app_url="https://example.com",
-                            run_id="run1",
-                            storage_state=None,
-                            headless=True,
-                        )
+        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+            with patch("blop.engine.browser.make_browser_profile"):
+                with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                    cases = await run_flows(
+                        flows=flows,
+                        app_url="https://example.com",
+                        run_id="run1",
+                        storage_state=None,
+                        headless=True,
+                    )
 
     assert len(cases) == 3
     assert all(c.run_id == "run1" for c in cases)
@@ -130,7 +150,7 @@ async def test_run_flows_parallel():
 
 @pytest.mark.asyncio
 async def test_run_flows_propagates_business_criticality():
-    """Flow with business_criticality='revenue' → resulting FailureCase has same value."""
+    """Flow with business_criticality='revenue' -> resulting FailureCase has same value."""
     from blop.engine.regression import run_flows
     from blop.schemas import RecordedFlow
 
@@ -154,21 +174,23 @@ async def test_run_flows_propagates_business_criticality():
     mock_session.context = None
     mock_session.aclose = AsyncMock()
 
+    mock_bu = _mock_browser_use()
+    mock_bu.Agent.return_value = mock_agent
+    mock_bu.BrowserSession.return_value = mock_session
+
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch("browser_use.Agent", return_value=mock_agent):
-            with patch("browser_use.BrowserSession", return_value=mock_session):
-                with patch("blop.engine.browser.make_browser_profile"):
-                    with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
-                        cases = await run_flows(
-                            flows=[revenue_flow],
-                            app_url="https://example.com",
-                            run_id="run-rev",
-                            storage_state=None,
-                            headless=True,
-                        )
+        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+            with patch("blop.engine.browser.make_browser_profile"):
+                with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
+                    cases = await run_flows(
+                        flows=[revenue_flow],
+                        app_url="https://example.com",
+                        run_id="run-rev",
+                        storage_state=None,
+                        headless=True,
+                    )
 
     assert len(cases) == 1
-    # business_criticality is set by _run_and_persist after run_flows, but the flow_id is propagated
     assert cases[0].flow_id == "flow-rev"
     assert cases[0].flow_name == "checkout_with_credit_card"
 

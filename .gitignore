@@ -29,5 +29,8 @@ Thumbs.db
 # Logs
 *.log
 
+# Mock artifacts (created by unittest.mock during test runs)
+<MagicMock*
+
 # MCP server config (may contain local paths or secrets)
 .cursor/mcp.json

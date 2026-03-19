@@ -5,9 +5,14 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 from blop.schemas import AuthProfile
+
+# Anchor .blop/ to the repo root so paths work regardless of the server's CWD.
+# auth.py lives at src/blop/engine/auth.py → 4 levels up = repo root.
+_BLOP_DIR: str = str(Path(__file__).parent.parent.parent.parent / ".blop")
 
 _auth_cache: dict[str, dict] = {}
 # Per-profile lock to prevent concurrent logins racing each other
@@ -33,8 +38,8 @@ async def resolve_storage_state(profile: AuthProfile) -> Optional[str]:
 
 async def _env_login(profile: AuthProfile) -> Optional[str]:
     cache_key = profile.profile_name
-    os.makedirs(".blop", exist_ok=True)
-    state_path = os.path.join(".blop", f"auth_state_{cache_key}.json")
+    os.makedirs(_BLOP_DIR, exist_ok=True)
+    state_path = os.path.join(_BLOP_DIR, f"auth_state_{cache_key}.json")
 
     # Fast path: in-memory cache hit
     entry = _auth_cache.get(cache_key)
@@ -87,32 +92,83 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context()
-                page = await context.new_page()
-                await page.goto(login_url)
-                await _try_fill(page, _user_selectors, username)
-                working_pass_sel = await _try_fill(page, _pass_selectors, password)
-                await page.press(working_pass_sel, "Enter")
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                # Use a persistent context when user_data_dir is set — this prevents
+                # OAuth providers (Google, GitHub) from detecting a fresh browser context
+                # as a bot and blocking automated login.
+                if profile.user_data_dir:
+                    os.makedirs(profile.user_data_dir, exist_ok=True)
+                    context = await p.chromium.launch_persistent_context(
+                        profile.user_data_dir, headless=True,
+                    )
+                    browser = None
+                else:
+                    browser = await p.chromium.launch(headless=True)
+                    context = await browser.new_context()
 
-                # Validate login succeeded: current URL must not be the login page
-                current_url = page.url
-                login_failed = (
-                    login_url.rstrip("/") in current_url.rstrip("/")
-                    or "login" in current_url.lower()
-                    or "auth" in current_url.lower()
-                    or "signin" in current_url.lower()
-                )
-                if login_failed:
-                    await browser.close()
-                    # Login failed — fall back to existing state file if available
-                    if os.path.exists(state_path):
-                        return state_path
-                    return None
+                try:
+                    page = await context.new_page()
+                    await page.goto(login_url, wait_until="domcontentloaded", timeout=15000)
+                    await _try_fill(page, _user_selectors, username)
+                    working_pass_sel = await _try_fill(page, _pass_selectors, password)
+                    await page.press(working_pass_sel, "Enter")
 
-                await context.storage_state(path=state_path)
-                await browser.close()
+                    # Wait for navigation away from the login page.
+                    # Using a URL-polling loop handles multi-step OAuth redirects
+                    # (login → IdP → MFA → callback → app) that fool networkidle.
+                    _login_path_kws = ("login", "signin", "sign-in", "oauth", "auth/")
+                    for _ in range(40):  # up to 20 seconds in 500ms steps
+                        await asyncio.sleep(0.5)
+                        current_url = page.url.lower()
+                        if not any(kw in current_url for kw in _login_path_kws):
+                            break
+                    else:
+                        # Fallback: just wait for network to settle
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+
+                    # Validate login succeeded: check URL and page text
+                    current_url = page.url
+
+                    page_text = ""
+                    try:
+                        page_text = (await page.evaluate("() => document.body.innerText")).lower()
+                    except Exception:
+                        pass
+                    _login_error_kws = (
+                        "invalid", "incorrect", "failed", "wrong password",
+                        "no account", "not found", "error signing in",
+                    )
+                    page_has_error = any(kw in page_text for kw in _login_error_kws)
+
+                    login_failed = (
+                        login_url.rstrip("/") in current_url.rstrip("/")
+                        or "login" in current_url.lower()
+                        or "auth" in current_url.lower()
+                        or "signin" in current_url.lower()
+                        or page_has_error
+                    )
+                    if login_failed:
+                        if os.path.exists(state_path):
+                            return state_path
+                        return None
+
+                    await context.storage_state(path=state_path)
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    if browser:
+                        try:
+                            await browser.close()
+                        except Exception:
+                            pass
+
+            # Cache update inside the lock — guaranteed to run only on successful login
+            _auth_cache[cache_key] = {"path": state_path, "expires": time.time() + 3600}
+            return state_path
 
         except Exception:
             # Login threw — fall back to existing state file if available
@@ -120,15 +176,40 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                 return state_path
             return None
 
-    _auth_cache[cache_key] = {"path": state_path, "expires": time.time() + 3600}
-    return state_path
-
 
 def _storage_state(profile: AuthProfile) -> Optional[str]:
     path = profile.storage_state_path or os.getenv("STORAGE_STATE_PATH")
-    if path and os.path.exists(path):
+    if not path:
+        return None
+    # Resolve relative paths against the repo root (where .blop/ lives),
+    # not the server process's CWD.
+    if not os.path.isabs(path):
+        path = str(Path(_BLOP_DIR).parent / path)
+    if os.path.exists(path):
         return path
     return None
+
+
+async def validate_auth_session(
+    storage_state_path: str,
+    app_url: str,
+    auth_redirect_patterns: tuple[str, ...] = ("/login", "/signin", "/sign-in", "/auth"),
+) -> bool:
+    """Open headless browser with storage_state, navigate to app_url, return True if not redirected to auth."""
+    from playwright.async_api import async_playwright
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(storage_state=storage_state_path)
+            page = await context.new_page()
+            await page.goto(app_url, wait_until="domcontentloaded", timeout=15000)
+            current_url = page.url.lower()
+            await context.close()
+            await browser.close()
+            return not any(pat in current_url for pat in auth_redirect_patterns)
+    except Exception:
+        return False
 
 
 async def _cookie_json(profile: AuthProfile) -> Optional[str]:
@@ -141,8 +222,8 @@ async def _cookie_json(profile: AuthProfile) -> Optional[str]:
     with open(cookie_path) as f:
         cookies = json.load(f)
 
-    os.makedirs(".blop", exist_ok=True)
-    state_path = os.path.join(".blop", f"auth_state_{profile.profile_name}.json")
+    os.makedirs(_BLOP_DIR, exist_ok=True)
+    state_path = os.path.join(_BLOP_DIR, f"auth_state_{profile.profile_name}.json")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
